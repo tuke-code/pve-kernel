@@ -99,7 +99,7 @@ Signed-off-by: Fiona Ebner <f.ebner@proxmox.com>
  3 files changed, 24 insertions(+), 21 deletions(-)
 
 diff --git a/arch/arm64/kvm/vgic/vgic-its.c b/arch/arm64/kvm/vgic/vgic-its.c
-index 7abb685c654654e7aa46af8cadd41d3ecda346c5..e9ef7686a95240d02d5d683e18755075facef3b8 100644
+index a81f8dab85ac93ec74ccffc19dfcc6389896da50..6e31c1c31be2e98ad9d1a760e3814dc18e2c9aa6 100644
 --- a/arch/arm64/kvm/vgic/vgic-its.c
 +++ b/arch/arm64/kvm/vgic/vgic-its.c
 @@ -116,18 +116,26 @@ static struct vgic_irq *vgic_add_lpi(struct kvm *kvm, u32 intid,

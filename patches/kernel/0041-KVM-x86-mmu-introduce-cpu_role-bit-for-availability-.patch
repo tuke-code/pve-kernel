@@ -23,10 +23,10 @@ Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
  3 files changed, 16 insertions(+), 1 deletion(-)
 
 diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
-index 8b4a55cc0918ebd093aeaf435de7cfe18e382e18..e20f729f6eb2ee5a36edeb3decd6a2bb014eb67f 100644
+index 0b77f025f323956ead85376f05eabf4121458620..3c6fcb617dc437c8de8943aa492717e57a5dc7b0 100644
 --- a/arch/x86/include/asm/kvm_host.h
 +++ b/arch/x86/include/asm/kvm_host.h
-@@ -413,6 +413,13 @@ union kvm_mmu_extended_role {
+@@ -415,6 +415,13 @@ union kvm_mmu_extended_role {
  		unsigned int cr4_smap:1;
  		unsigned int cr4_la57:1;
  		unsigned int efer_lma:1;
@@ -41,7 +41,7 @@ index 8b4a55cc0918ebd093aeaf435de7cfe18e382e18..e20f729f6eb2ee5a36edeb3decd6a2bb
  };
  
 diff --git a/arch/x86/kvm/mmu/mmu.c b/arch/x86/kvm/mmu/mmu.c
-index 3231acd69f947c6b882b3bc2f9ee95acf19f1100..838a12b948848ff8c233535d28a72117cead2a6d 100644
+index 46b034f78555ccfe7fbe0e2f44ec661d550be185..ed350526b07dfc81b8c6f3bb8e9b68f647db36aa 100644
 --- a/arch/x86/kvm/mmu/mmu.c
 +++ b/arch/x86/kvm/mmu/mmu.c
 @@ -236,6 +236,11 @@ BUILD_MMU_ROLE_ACCESSOR(ext,  cr4, la57);
@@ -56,7 +56,7 @@ index 3231acd69f947c6b882b3bc2f9ee95acf19f1100..838a12b948848ff8c233535d28a72117
  static inline bool is_cr0_pg(struct kvm_mmu *mmu)
  {
          return mmu->cpu_role.base.level > 0;
-@@ -5783,6 +5788,8 @@ static union kvm_cpu_role kvm_calc_cpu_role(struct kvm_vcpu *vcpu,
+@@ -5788,6 +5793,8 @@ static union kvm_cpu_role kvm_calc_cpu_role(struct kvm_vcpu *vcpu,
  	role.ext.cr4_pke = ____is_efer_lma(regs) && ____is_cr4_pke(regs);
  	role.ext.cr4_la57 = ____is_efer_lma(regs) && ____is_cr4_la57(regs);
  	role.ext.efer_lma = ____is_efer_lma(regs);
@@ -65,7 +65,7 @@ index 3231acd69f947c6b882b3bc2f9ee95acf19f1100..838a12b948848ff8c233535d28a72117
  	return role;
  }
  
-@@ -5936,6 +5943,7 @@ void kvm_init_shadow_npt_mmu(struct kvm_vcpu *vcpu, unsigned long cr0,
+@@ -5941,6 +5948,7 @@ void kvm_init_shadow_npt_mmu(struct kvm_vcpu *vcpu, unsigned long cr0,
  
  	/* NPT requires CR0.PG=1. */
  	WARN_ON_ONCE(cpu_role.base.direct || !cpu_role.base.guest_mode);

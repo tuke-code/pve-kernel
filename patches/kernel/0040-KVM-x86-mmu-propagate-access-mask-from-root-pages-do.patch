@@ -28,10 +28,10 @@ Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
  4 files changed, 15 insertions(+), 12 deletions(-)
 
 diff --git a/arch/x86/kvm/mmu/mmu.c b/arch/x86/kvm/mmu/mmu.c
-index 414eb4b0afa8f39ae62fad50d32cf89ef7663f0c..3231acd69f947c6b882b3bc2f9ee95acf19f1100 100644
+index 05d255745a03533772428ebe5e7ae1a8a9e43b0f..46b034f78555ccfe7fbe0e2f44ec661d550be185 100644
 --- a/arch/x86/kvm/mmu/mmu.c
 +++ b/arch/x86/kvm/mmu/mmu.c
-@@ -3435,12 +3435,13 @@ static int direct_map(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
+@@ -3440,12 +3440,13 @@ static int direct_map(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
  {
  	struct kvm_shadow_walk_iterator it;
  	struct kvm_mmu_page *sp;
@@ -47,7 +47,7 @@ index 414eb4b0afa8f39ae62fad50d32cf89ef7663f0c..3231acd69f947c6b882b3bc2f9ee95ac
  	for_each_shadow_entry(vcpu, fault->addr, it) {
  		/*
  		 * We cannot overwrite existing page tables with an NX
-@@ -3453,7 +3454,7 @@ static int direct_map(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
+@@ -3458,7 +3459,7 @@ static int direct_map(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
  		if (it.level == fault->goal_level)
  			break;
  
@@ -56,7 +56,7 @@ index 414eb4b0afa8f39ae62fad50d32cf89ef7663f0c..3231acd69f947c6b882b3bc2f9ee95ac
  		if (sp == ERR_PTR(-EEXIST))
  			continue;
  
-@@ -3466,7 +3467,7 @@ static int direct_map(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
+@@ -3471,7 +3472,7 @@ static int direct_map(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
  	if (WARN_ON_ONCE(it.level != fault->goal_level))
  		return -EFAULT;
  
@@ -113,7 +113,7 @@ index 3cf96311360b76205bbcb9ec6ebbfefe0005128c..14b00ee4e4516eec02a94f1e607ba2c1
  	for (; shadow_walk_okay(&it); shadow_walk_next(&it)) {
  		/*
 diff --git a/arch/x86/kvm/mmu/tdp_mmu.c b/arch/x86/kvm/mmu/tdp_mmu.c
-index 9c26038f6b77ec84287046f408a6b8d8a314f3f2..25e557de99d69a7acff8f2b4c2df85252c0a53fa 100644
+index c87be010bf8a3b82a198181474b5383e268546c1..b70d043d7a5b89b5d1aad00dfb07150729c9974c 100644
 --- a/arch/x86/kvm/mmu/tdp_mmu.c
 +++ b/arch/x86/kvm/mmu/tdp_mmu.c
 @@ -1185,9 +1185,9 @@ static int tdp_mmu_map_handle_target_level(struct kvm_vcpu *vcpu,

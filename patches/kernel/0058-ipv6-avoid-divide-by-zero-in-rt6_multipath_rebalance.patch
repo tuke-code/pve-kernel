@@ -44,7 +44,7 @@ Signed-off-by: Fabian Grünbichler <f.gruenbichler@proxmox.com>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/net/ipv6/route.c b/net/ipv6/route.c
-index bd6c746efac252ae8e7379ed5e34bb18728ba47e..8534fb7b2684579cc41b8878b3ec8ca6ddd945fc 100644
+index 996a24bd1c6a9beec93ddb81a630a82f284985ef..dc4352d883fa9812c7f41a1c938ffe261d4ffec7 100644
 --- a/net/ipv6/route.c
 +++ b/net/ipv6/route.c
 @@ -4828,7 +4828,7 @@ static void rt6_upper_bound_set(struct fib6_info *rt, int *weight, int total)

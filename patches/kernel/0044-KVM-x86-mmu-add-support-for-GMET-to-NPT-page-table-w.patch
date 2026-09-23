@@ -19,10 +19,10 @@ Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
  4 files changed, 22 insertions(+), 10 deletions(-)
 
 diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
-index e20f729f6eb2ee5a36edeb3decd6a2bb014eb67f..99f37fc132ab268a42ede89981f84d43f0e0e814 100644
+index 3c6fcb617dc437c8de8943aa492717e57a5dc7b0..0d07f315e2a75825b0112f2c4386ac2bc4d4dd95 100644
 --- a/arch/x86/include/asm/kvm_host.h
 +++ b/arch/x86/include/asm/kvm_host.h
-@@ -369,6 +369,8 @@ union kvm_mmu_page_role {
+@@ -371,6 +371,8 @@ union kvm_mmu_page_role {
  		 * cr4_smep is also set for EPT MBEC.  Because it affects
  		 * which pages are considered non-present (bit 10 additionally
  		 * must be zero if MBEC is on) it has to be in the base role.
@@ -45,7 +45,7 @@ index 1b354e1f2d812f34286446f33be3df6ba5f5dc47..ddf4e467c071ebc21d07613eda1f2ef6
  			     int huge_page_level, bool accessed_dirty,
  			     bool mbec, gpa_t new_eptp);
 diff --git a/arch/x86/kvm/mmu/mmu.c b/arch/x86/kvm/mmu/mmu.c
-index 8da7d461a42bdb85bf813cbc5ea331ce9dbc8f51..57295a62e2fea47d73065916d67990b609021618 100644
+index a5a697f797dd23726b9ba1c9ac91a9986618c107..5498d7950d104b7cb87c3b6d8e19b7453b0a9621 100644
 --- a/arch/x86/kvm/mmu/mmu.c
 +++ b/arch/x86/kvm/mmu/mmu.c
 @@ -55,6 +55,7 @@
@@ -56,7 +56,7 @@ index 8da7d461a42bdb85bf813cbc5ea331ce9dbc8f51..57295a62e2fea47d73065916d67990b6
  #include <asm/vmx.h>
  
  #include "trace.h"
-@@ -5562,7 +5563,7 @@ reset_ept_shadow_zero_bits_mask(struct kvm_mmu *context, bool execonly)
+@@ -5567,7 +5568,7 @@ reset_ept_shadow_zero_bits_mask(struct kvm_mmu *context, bool execonly)
  	 (14 & (access) ? 1 << 14 : 0) | \
  	 (15 & (access) ? 1 << 15 : 0))
  
@@ -65,7 +65,7 @@ index 8da7d461a42bdb85bf813cbc5ea331ce9dbc8f51..57295a62e2fea47d73065916d67990b6
  {
  	unsigned byte;
  
-@@ -5623,7 +5624,12 @@ static void update_permission_bitmask(struct kvm_mmu *mmu, bool ept)
+@@ -5628,7 +5629,12 @@ static void update_permission_bitmask(struct kvm_mmu *mmu, bool ept)
  			/* Faults from kernel mode accesses to user pages */
  			u16 kf = (pfec & PFERR_USER_MASK) ? 0 : u;
  
@@ -79,7 +79,7 @@ index 8da7d461a42bdb85bf813cbc5ea331ce9dbc8f51..57295a62e2fea47d73065916d67990b6
  
  			if (efer_nx)
  				ff = (pfec & PFERR_FETCH_MASK) ? (u16)~x : 0;
-@@ -5734,7 +5740,7 @@ static void reset_guest_paging_metadata(struct kvm_vcpu *vcpu,
+@@ -5739,7 +5745,7 @@ static void reset_guest_paging_metadata(struct kvm_vcpu *vcpu,
  		return;
  
  	reset_guest_rsvds_bits_mask(vcpu, mmu);
@@ -88,7 +88,7 @@ index 8da7d461a42bdb85bf813cbc5ea331ce9dbc8f51..57295a62e2fea47d73065916d67990b6
  	update_pkru_bitmask(mmu);
  }
  
-@@ -5930,7 +5936,7 @@ static void kvm_init_shadow_mmu(struct kvm_vcpu *vcpu,
+@@ -5935,7 +5941,7 @@ static void kvm_init_shadow_mmu(struct kvm_vcpu *vcpu,
  }
  
  void kvm_init_shadow_npt_mmu(struct kvm_vcpu *vcpu, unsigned long cr4,
@@ -97,7 +97,7 @@ index 8da7d461a42bdb85bf813cbc5ea331ce9dbc8f51..57295a62e2fea47d73065916d67990b6
  {
  	struct kvm_mmu *context = &vcpu->arch.guest_mmu;
  	struct kvm_mmu_role_regs regs = {
-@@ -5943,7 +5949,7 @@ void kvm_init_shadow_npt_mmu(struct kvm_vcpu *vcpu, unsigned long cr4,
+@@ -5948,7 +5954,7 @@ void kvm_init_shadow_npt_mmu(struct kvm_vcpu *vcpu, unsigned long cr4,
  
  	/* NPT requires CR0.PG=1. */
  	WARN_ON_ONCE(cpu_role.base.direct || !cpu_role.base.guest_mode);
@@ -106,7 +106,7 @@ index 8da7d461a42bdb85bf813cbc5ea331ce9dbc8f51..57295a62e2fea47d73065916d67990b6
  
  	root_role = cpu_role.base;
  	root_role.level = kvm_mmu_get_tdp_level(vcpu);
-@@ -6001,7 +6007,7 @@ void kvm_init_shadow_ept_mmu(struct kvm_vcpu *vcpu, bool execonly,
+@@ -6006,7 +6012,7 @@ void kvm_init_shadow_ept_mmu(struct kvm_vcpu *vcpu, bool execonly,
  		context->gva_to_gpa = ept_gva_to_gpa;
  		context->sync_spte = ept_sync_spte;
  

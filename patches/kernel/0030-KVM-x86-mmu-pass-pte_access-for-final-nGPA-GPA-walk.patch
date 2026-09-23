@@ -22,10 +22,10 @@ Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
  6 files changed, 25 insertions(+), 15 deletions(-)
 
 diff --git a/arch/x86/kvm/hyperv.c b/arch/x86/kvm/hyperv.c
-index df9c8760b3232362543df892a75e0f20de3b87a0..52e5e4fd7dfc5a7227bd0a4594c642c3e430a099 100644
+index 4f9d7ce2eaf95e9e628271847bd7556915d96b38..fa1ca067d8f3d7b34f623257328ecdc283fb8a72 100644
 --- a/arch/x86/kvm/hyperv.c
 +++ b/arch/x86/kvm/hyperv.c
-@@ -2047,7 +2047,7 @@ static u64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
+@@ -2058,7 +2058,7 @@ static u64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
  	 */
  	if (!hc->fast && mmu_is_nested(vcpu)) {
  		hc->ingpa = translate_nested_gpa(vcpu, hc->ingpa,
@@ -75,10 +75,10 @@ index 23f37535c0ce1d1e8e855ef3f94cae97cbb9c33c..635c2e5d8513dc0327f2d221007d21cf
  
  static inline bool kvm_has_mirrored_tdp(const struct kvm *kvm)
 diff --git a/arch/x86/kvm/mmu/mmu.c b/arch/x86/kvm/mmu/mmu.c
-index 0c863ca9d63f04dc217a62687cee5170f0d3285e..7283f3fddfcc468f4ad1d8105b87eaeaccccb209 100644
+index 9441962bb0ec97630a8c92075d95727d7b4cf94e..33dd380f8191e6edd0fa7f7ac8e52b21b942d918 100644
 --- a/arch/x86/kvm/mmu/mmu.c
 +++ b/arch/x86/kvm/mmu/mmu.c
-@@ -4337,8 +4337,14 @@ static gpa_t nonpaging_gva_to_gpa(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
+@@ -4342,8 +4342,14 @@ static gpa_t nonpaging_gva_to_gpa(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
  {
  	if (exception)
  		exception->error_code = 0;
@@ -134,7 +134,7 @@ index 121bfb2217e83d5c2926e2155cb9ded5ff5d3b00..8a4c09c5cdbfb3000670b92fe9404738
  #define SPTE_LEVEL_SHIFT(level)		__PT_LEVEL_SHIFT(level, SPTE_LEVEL_BITS)
  #define SPTE_INDEX(address, level)	__PT_INDEX(address, level, SPTE_LEVEL_BITS)
 diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
-index d00d201a0af4c51fa5f09002f512b21adec27c24..8e8b96e204c4ed33eb48a7481511a8238a190ed1 100644
+index d1a0d23a135ddfa7ea38d629fe2391301a6e150e..2da451582e8fef8898949fda310cbc6e0d730f3b 100644
 --- a/arch/x86/kvm/x86.c
 +++ b/arch/x86/kvm/x86.c
 @@ -1070,7 +1070,7 @@ int load_pdptrs(struct kvm_vcpu *vcpu, unsigned long cr3)
@@ -146,7 +146,7 @@ index d00d201a0af4c51fa5f09002f512b21adec27c24..8e8b96e204c4ed33eb48a7481511a823
  	if (real_gpa == INVALID_GPA)
  		return 0;
  
-@@ -7852,7 +7852,8 @@ void kvm_get_segment(struct kvm_vcpu *vcpu,
+@@ -7855,7 +7855,8 @@ void kvm_get_segment(struct kvm_vcpu *vcpu,
  }
  
  gpa_t translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa, u64 access,

@@ -53,7 +53,7 @@ index 5bb1ca2278f4dd3c8f43c0e3f11b23af94740665..ffe9672f7be71694a1a2b90c621e2bd0
  	 * The other bits are set to 0.
  	 */
 diff --git a/arch/x86/kvm/vmx/nested.c b/arch/x86/kvm/vmx/nested.c
-index e0c9c955b8a05583fa67f1c2570bc63d1269aaec..1b00f24f937e6a7fe824927b9a3f1ba1bdc9f457 100644
+index c76d8ec0165f60bd54748665d6498e2d6d9b3699..de70f63053da5ee9c7fb6ad7dccf58b88be69a8f 100644
 --- a/arch/x86/kvm/vmx/nested.c
 +++ b/arch/x86/kvm/vmx/nested.c
 @@ -450,10 +450,14 @@ static void nested_ept_inject_page_fault(struct kvm_vcpu *vcpu,
@@ -74,7 +74,7 @@ index e0c9c955b8a05583fa67f1c2570bc63d1269aaec..1b00f24f937e6a7fe824927b9a3f1ba1
  			vm_exit_reason = EXIT_REASON_EPT_VIOLATION;
  		}
  
-@@ -7239,7 +7243,8 @@ static void nested_vmx_setup_secondary_ctls(u32 ept_caps,
+@@ -7250,7 +7254,8 @@ static void nested_vmx_setup_secondary_ctls(u32 ept_caps,
  			VMX_EPT_PAGE_WALK_5_BIT |
  			VMX_EPTP_WB_BIT |
  			VMX_EPT_INVEPT_BIT |

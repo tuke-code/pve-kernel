@@ -23,10 +23,10 @@ Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
  4 files changed, 11 insertions(+), 5 deletions(-)
 
 diff --git a/arch/x86/kvm/hyperv.c b/arch/x86/kvm/hyperv.c
-index ad59c22979bde5171aeb7baf6e9a2a3c715f8d81..df9c8760b3232362543df892a75e0f20de3b87a0 100644
+index 2d03f136b126fe4c10f17874e0bbecc6cd6a6f62..4f9d7ce2eaf95e9e628271847bd7556915d96b38 100644
 --- a/arch/x86/kvm/hyperv.c
 +++ b/arch/x86/kvm/hyperv.c
-@@ -2046,7 +2046,8 @@ static u64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
+@@ -2057,7 +2057,8 @@ static u64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
  	 * read with kvm_read_guest().
  	 */
  	if (!hc->fast && mmu_is_nested(vcpu)) {
@@ -37,10 +37,10 @@ index ad59c22979bde5171aeb7baf6e9a2a3c715f8d81..df9c8760b3232362543df892a75e0f20
  			return HV_STATUS_INVALID_HYPERCALL_INPUT;
  	}
 diff --git a/arch/x86/kvm/mmu/mmu.c b/arch/x86/kvm/mmu/mmu.c
-index 48fd0c0bd9191a2e44b0a76b193a69a9cdc97caa..0c863ca9d63f04dc217a62687cee5170f0d3285e 100644
+index ebbe164df1d82de835e937d1e999640b078cdc2f..9441962bb0ec97630a8c92075d95727d7b4cf94e 100644
 --- a/arch/x86/kvm/mmu/mmu.c
 +++ b/arch/x86/kvm/mmu/mmu.c
-@@ -4337,7 +4337,8 @@ static gpa_t nonpaging_gva_to_gpa(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
+@@ -4342,7 +4342,8 @@ static gpa_t nonpaging_gva_to_gpa(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
  {
  	if (exception)
  		exception->error_code = 0;
@@ -76,7 +76,7 @@ index 50db62f2a072dfe0228c8cb982afde9e5cd4e932..1ab9ed3100453c6c9133d256073d873b
  		return 0;
  
 diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
-index 7c1ada5e4a9230e82984b82bf1dd9a10ffbaa946..d00d201a0af4c51fa5f09002f512b21adec27c24 100644
+index 8284fcd704738fc0ffac40e75ae6aca985d78cc8..d1a0d23a135ddfa7ea38d629fe2391301a6e150e 100644
 --- a/arch/x86/kvm/x86.c
 +++ b/arch/x86/kvm/x86.c
 @@ -1069,7 +1069,8 @@ int load_pdptrs(struct kvm_vcpu *vcpu, unsigned long cr3)

@@ -26,10 +26,10 @@ Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
  4 files changed, 43 insertions(+), 8 deletions(-)
 
 diff --git a/arch/x86/kvm/mmu/mmu.c b/arch/x86/kvm/mmu/mmu.c
-index 9e6defe86c856923f2dbf4c78dfc31d35f7d5a93..863f9a18ca55f620489490c61bdb916dae17c954 100644
+index 3d437e2dda3e36e1980678da8a57697763246029..400fe6857d84acfc57ca376d80c0b2d0bbe1d646 100644
 --- a/arch/x86/kvm/mmu/mmu.c
 +++ b/arch/x86/kvm/mmu/mmu.c
-@@ -5560,7 +5560,6 @@ static void update_permission_bitmask(struct kvm_mmu *mmu, bool ept)
+@@ -5565,7 +5565,6 @@ static void update_permission_bitmask(struct kvm_mmu *mmu, bool ept)
  {
  	unsigned byte;
  
@@ -37,7 +37,7 @@ index 9e6defe86c856923f2dbf4c78dfc31d35f7d5a93..863f9a18ca55f620489490c61bdb916d
  	const u16 w = ACC_BITS_MASK(ACC_WRITE_MASK);
  	const u16 r = ACC_BITS_MASK(ACC_READ_MASK);
  
-@@ -5601,8 +5600,18 @@ static void update_permission_bitmask(struct kvm_mmu *mmu, bool ept)
+@@ -5606,8 +5605,18 @@ static void update_permission_bitmask(struct kvm_mmu *mmu, bool ept)
  		u16 smapf = 0;
  
  		if (ept) {
@@ -151,10 +151,10 @@ index f5261d993eac0316e5115f3cc63ae53d9989f625..fe9571837fee6d37b8dfbc7ac6660968
  }
  
 diff --git a/arch/x86/kvm/vmx/nested.c b/arch/x86/kvm/vmx/nested.c
-index 1b00f24f937e6a7fe824927b9a3f1ba1bdc9f457..e74518013c424f6ac0ea6ec34973ea95a18cfa61 100644
+index de70f63053da5ee9c7fb6ad7dccf58b88be69a8f..a568263ff1a6a9d10409d6da142231e89b8f6f18 100644
 --- a/arch/x86/kvm/vmx/nested.c
 +++ b/arch/x86/kvm/vmx/nested.c
-@@ -7451,6 +7451,15 @@ static gpa_t vmx_translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa,
+@@ -7462,6 +7462,15 @@ static gpa_t vmx_translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa,
  	struct kvm_mmu *mmu = vcpu->arch.mmu;
  
  	BUG_ON(!mmu_is_nested(vcpu));

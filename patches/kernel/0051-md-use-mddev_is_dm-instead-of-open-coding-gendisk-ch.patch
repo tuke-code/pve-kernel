@@ -16,7 +16,7 @@ Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
  1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/md/md.c b/drivers/md/md.c
-index 96616cd67c17809e7abb4e158790bc4fe6b5f11f..92d6342283483186014fe0d83928bde12953716b 100644
+index da761ba80829b4228a9d16d1c02705ebc661279c..c92a82a25e6ec5b97b31faddb6b4b77f4fc9e0a4 100644
 --- a/drivers/md/md.c
 +++ b/drivers/md/md.c
 @@ -416,7 +416,7 @@ bool md_handle_request(struct mddev *mddev, struct bio *bio)
@@ -28,7 +28,7 @@ index 96616cd67c17809e7abb4e158790bc4fe6b5f11f..92d6342283483186014fe0d83928bde1
  			return false;
  		goto check_suspended;
  	}
-@@ -6754,7 +6754,7 @@ int md_run(struct mddev *mddev)
+@@ -6761,7 +6761,7 @@ int md_run(struct mddev *mddev)
  	}
  
  	/* dm-raid expect sync_thread to be frozen until resume */
