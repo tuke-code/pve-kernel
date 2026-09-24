@@ -1,3 +1,103 @@
+proxmox-kernel-7.0 (7.0.14-20) trixie; urgency=medium
+
+  * update submodules and patches to Ubuntu-7.0.0-39.39
+    - upstream stable changes 6.18.50-6.18.51 and 7.2.2-7.2.5
+
+  * cherry-picks for the following CVEs from stable 7.2 and mainline 7.1:
+    - CVE-2026-90063: virtio-net: Ensure that TCP packets don't overflow
+      gso_segs
+    - CVE-2026-90105: vxlan: fix reading neigh ha
+    - CVE-2026-90106: net: bridge: arp/nd proxy: fix reading neigh ha
+    - CVE-2026-90232: amt: Don't support cross-netns setup
+    - CVE-2026-90061: netfilter: nf_tables: skip double clone set expressions
+      on element insert
+    - CVE-2026-90071: net/sched: sch_teql: restore skb->dev on the slave
+      failure path
+    - CVE-2026-90073: net/sched: hhf: clamp quantum before hhf_change() to
+      avoid overflow
+    - CVE-2026-90074: net/sched: fq_pie: clamp default quantum to avoid signed
+      overflow
+    - CVE-2026-90075: net/sched: fq_codel: clamp default quantum and mtu
+    - CVE-2026-90076: net/sched: fq: add overflow bounds to quantum and initial
+      quantum
+    - CVE-2026-90050: net/sched: fq: clamp quantum and initial_quantum in
+      change path
+    - CVE-2026-90078: net/sched: act_skbmod: fix length calculations and avoid
+      invalid header warnings
+    - CVE-2026-90109: net: sched: fix 32-bit backlog wrap in gred, bfifo and
+      plug enqueue
+    - CVE-2026-90248: net/sched: cls_api: fix teardown of an adopted proto on
+      insert-race loss
+    - CVE-2026-90111: ip6mr: do not clone dst in ip6mr_cache_report()
+    - CVE-2026-90110: inetpeer: randomize RB-tree node comparison using SipHash
+    - CVE-2026-90201: net: page_pool: fix UAF in __page_pool_release_netmem_dma
+      on xa_cmpxchg race
+    - CVE-2026-64190: net: team: fix NULL pointer dereference in team_xmit
+      during mode change
+    - CVE-2026-89789: gtp: add synchronize_net() in gtp_newlink() error path to
+      prevent use-after-free
+    - CVE-2026-90067: libceph: validate banner payload length
+    - CVE-2026-90227: nvme/ioctl: check SUBMIT_IO with nvme_cmd_allowed()
+    - CVE-2026-90148: NFSv4: Fix incorrect argument passed to
+      nfs4_delete_lease() in nfs4_add_lease()
+    - CVE-2026-90234: NFS: Return a delegation the client fails to record
+    - CVE-2026-90400: md: recheck spare changes before starting sync
+    - CVE-2026-90325: blk-cgroup: skip dying blkg in blkcg_activate_policy()
+    - CVE-2026-90326: blk-cgroup: fix race between policy activation and blkg
+      destruction
+    - CVE-2026-90240: iommu/vt-d: Flush context cache with correct SID when
+      tearing down aliases
+    - CVE-2026-90435: RDMA/mlx5: Fix integer overflow of user QP buffer size
+    - CVE-2026-92495: RDMA/bnxt_re: Clear VM_MAYWRITE on DBR/toggle page mmap
+    - CVE-2026-90101: bnxt_en: Fix call to hardware monitoring event handler
+    - CVE-2026-93182: sched/fair: Fix overflow in update_tg_cfs_runnable()
+    - CVE-2026-90246: apparmor: fix integer overflow in verify_tags() bounds
+      check
+    - CVE-2026-93146: time/namespace: Validate nanosecond field in
+      proc_timens_set_offset()
+    - CVE-2026-93066: x86/mm/pat: Take cpa_lock around large-page collapse
+
+  * cherry-pick fixes from stable 7.2 that have no CVE assigned yet:
+    - af_packet: Don't cast tpacket_hdr.tp_len to int in tpacket_parse_header()
+    - af_unix: Update last skb marker in manage_oob()
+    - af_unix: Return immediately when manage_oob() returns NULL for 0-length
+      buffer
+    - ipv6: fix fib6 walker UAF on seq stop
+    - ipv6: mcast: fix RCU list diversion in ip6_mc_del1_src()
+    - ipv6: mcast: use copy-on-write RCU updates in ip6_mc_source()
+    - ipv6: mcast: use rcu_assign_pointer() for __rcu list updates
+    - ipv6: null-check fib6_node before accessing in __ip6_del_rt_siblings()
+    - ipv6: flowlabel: cap duplicate leases per socket
+    - ipv4: fib: bound automatic table ID allocation
+    - inet: frags: invalidate queues before flushing them
+    - net: iptunnel: fix stale transport header during tunnel decapsulation
+    - net: cap tx_queue_len at S16_MAX to prevent oversized ring allocations
+    - net/sched: defer qdisc freeing after failed creation
+    - net/sched: cls_route: free emptied bucket on filter move
+    - net/sched: cls_api: Don't replay RTM_GETCHAIN in tc_ctl_chain()
+    - net/sched: cls_u32: fix duplicate handle when node ID pool is exhausted
+    - net/sched: drr: clamp quantum in change class
+    - net/sched: ets: clamp quantum in parse and fallback paths
+    - net/sched: fq_pie: clamp quantum in change path
+    - net/sched: hhf: clamp quantum in change and init paths
+    - net/sched: sfq: clamp quantum in change path
+    - vxlan: mdb: Fix use-after-free in vxlan_mdb_flush()
+    - vxlan: mdb: Fix use-after-free in vxlan_mdb_remote_src_del()
+    - vxlan: initialize _md in vxlan_xmit_one()
+    - net: bridge: mcast: properly convert mglist to rcu
+    - netfilter: nfnetlink_log: cope with concurrent instance destruction
+    - bonding: alb: fix uninitialized transport header access in
+      alb_determine_nd()
+    - scsi: mpt3sas: Avoid out-of-bounds cpumask_of_node() call in
+      _base_assign_reply_queues()
+    - x86/mm/pat: Acquire init_mm write lock on collapse to avoid UAF
+
+  * fix user-space data loss with MADV_FREE on transparent huge pages, where
+    reclaim under memory pressure could discard data written after the
+    MADV_FREE call if the page protection got changed in between
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 24 Sep 2026 12:43:24 +0200
+
 proxmox-kernel-7.0 (7.0.14-19) trixie; urgency=medium
 
   * fix #7734: fix regression with misaligned direct I/O (CVE-2026-89584)
