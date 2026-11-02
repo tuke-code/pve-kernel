@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Amir Goldstein <amir73il@gmail.com>
+Date: Fri, 16 Oct 2026 13:21:34 +0200
+Subject: [PATCH] vfs: add try_take_dentry_name_snapshot()
+
+take_dentry_name_snapshot() requires the caller to keep the dentry
+alive. The external name of a dead dentry has a zero refcount that
+never changes, so atomic_inc_not_zero() fails on every retry and the
+function never returns.
+
+A caller in RCU walk holds no reference on the dentry. Add a variant
+that fails instead of retrying when it cannot get a reference on the
+external name, so such a caller can return -ECHILD.
+
+Reviewed-by: Christian Brauner (Amutable) <brauner@kernel.org>
+Signed-off-by: Amir Goldstein <amir73il@gmail.com>
+(cherry picked from commit 15c6bd5cf109471baca7fbe46e8f574569257a28)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/dcache.c            | 29 ++++++++++++++++++++++++++---
+ include/linux/dcache.h |  1 +
+ 2 files changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/fs/dcache.c b/fs/dcache.c
+index 840b9e3ed5db093e6a2e70dca62178687bd3b192..c4588a1754f1fb18f496273f1070bcf83ddaa367 100644
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -358,7 +358,8 @@ static inline int dname_external(const struct dentry *dentry)
+ 	return dentry->d_name.name != dentry->d_shortname.string;
+ }
+ 
+-void take_dentry_name_snapshot(struct name_snapshot *name, struct dentry *dentry)
++static bool __take_dentry_name_snapshot(struct name_snapshot *name,
++					struct dentry *dentry, bool retry)
+ {
+ 	unsigned seq;
+ 	const unsigned char *s;
+@@ -375,8 +376,12 @@ void take_dentry_name_snapshot(struct name_snapshot *name, struct dentry *dentry
+ 		struct external_name *p;
+ 		p = container_of(s, struct external_name, name[0]);
+ 		// get a valid reference
+-		if (unlikely(!atomic_inc_not_zero(&p->count)))
+-			goto retry;
++		if (unlikely(!atomic_inc_not_zero(&p->count))) {
++			if (retry)
++				goto retry;
++			rcu_read_unlock();
++			return false;
++		}
+ 		name->name.name = s;
+ 	}
+ 	if (read_seqcount_retry(&dentry->d_seq, seq)) {
+@@ -384,9 +389,27 @@ void take_dentry_name_snapshot(struct name_snapshot *name, struct dentry *dentry
+ 		goto retry;
+ 	}
+ 	rcu_read_unlock();
++	return true;
++}
++
++void take_dentry_name_snapshot(struct name_snapshot *name, struct dentry *dentry)
++{
++	__take_dentry_name_snapshot(name, dentry, true);
+ }
+ EXPORT_SYMBOL(take_dentry_name_snapshot);
+ 
++/*
++ * For a caller that holds no reference on @dentry, e.g. in RCU walk.
++ * The external name of a dead dentry has a zero refcount forever, so
++ * take_dentry_name_snapshot() would retry without end.  Fail instead.
++ */
++bool try_take_dentry_name_snapshot(struct name_snapshot *name,
++				   struct dentry *dentry)
++{
++	return __take_dentry_name_snapshot(name, dentry, false);
++}
++EXPORT_SYMBOL(try_take_dentry_name_snapshot);
++
+ void release_dentry_name_snapshot(struct name_snapshot *name)
+ {
+ 	if (unlikely(name->name.name != name->inline_name.string)) {
+diff --git a/include/linux/dcache.h b/include/linux/dcache.h
+index 898c60d21c92b1792c9b1543d11cecaf4e70bcf8..2beaed3c5658a62385802028389cddaa0c1bacb1 100644
+--- a/include/linux/dcache.h
++++ b/include/linux/dcache.h
+@@ -599,6 +599,7 @@ struct name_snapshot {
+ 	union shortname_store inline_name;
+ };
+ void take_dentry_name_snapshot(struct name_snapshot *, struct dentry *);
++bool try_take_dentry_name_snapshot(struct name_snapshot *, struct dentry *);
+ void release_dentry_name_snapshot(struct name_snapshot *);
+ 
+ static inline struct dentry *d_first_child(const struct dentry *dentry)
