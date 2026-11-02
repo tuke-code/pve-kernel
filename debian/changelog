@@ -1,3 +1,42 @@
+proxmox-kernel-7.0 (7.0.14-28) trixie; urgency=medium
+
+  * ZFS: actually revert the fix for memory-mapped files serving stale data
+    after a rollback or receive (#7653). The 7.0.14-27 package still
+    contained it, as its build reused outdated ZFS sources, so receives and
+    rollbacks into mounted datasets could still deadlock as described there.
+
+  * fix #8264: net: fix a kernel crash when creating an ipip tunnel, which
+    hung all networking on the host until a reset since 7.0.14-25. Root in
+    an unprivileged container could trigger it too.
+
+  * amdgpu: stop logging a harmless warning with a stack trace on every boot
+    of some systems with AMD APUs, for example on ASRock Rack server boards,
+    whose firmware lists display outputs without hot-plug detection.
+
+  * e1000e: work around a hardware erratum that made Intel I219 NICs send
+    corrupted data and then hang ("Detected Hardware Unit Hang") with TCP
+    segmentation offload, triggered for example by forwarding VM traffic
+    over a bridge. Disabling TSO as a workaround should no longer be
+    needed.
+
+  * overlayfs: fix use-after-free bugs, a crash and an endless loop that
+    unprivileged users, also root in unprivileged containers, could trigger
+    with their own overlay mounts, and keep a change through an open
+    descriptor of a removed file from replacing whatever took its name in the
+    upper layer.
+
+  * fix a use-after-free in case-insensitive lookups on filesystems with
+    casefolding enabled, and races in io_uring on exec and coredumps,
+    including a use-after-free, that local users could trigger.
+
+  * net: fix an endless loop in SCTP that stalls a CPU, which a remote SCTP
+    peer or a local user could trigger, and memory corruption in VM sockets
+    (vsock). Also charge AF_XDP ring buffers to the memory cgroup that
+    creates them and bound an ebtables allocation, so that containers cannot
+    use these to exhaust the memory of the host.
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 02 Nov 2026 12:54:27 +0100
+
 proxmox-kernel-7.0 (7.0.14-27) trixie; urgency=medium
 
   * fix #8217: netfilter: flowtable: fall back to regular forwarding when the
