@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Andre Brait <andrebrait@gmail.com>
+Date: Sat, 24 Oct 2026 02:46:30 +0200
+Subject: [PATCH] e1000e: work around TSO erratum that corrupts data and hangs
+ Tx
+
+On I219, a TSO packet whose first buffer is long and has a 4 KB
+boundary just after the TCP checksum field makes the NIC send corrupted
+data and then hang the Tx DMA. Forwarded VM traffic (tun/vhost-net)
+produces such packets, so hosts bridging guests onto an I219 hit it
+within minutes:
+
+  e1000e 0000:00:1f.6 eno1: Detected Hardware Unit Hang
+
+Right before the hang the receiver gets TCP segments carrying data from
+128 bytes earlier in the stream, with a valid checksum.
+
+This is the erratum Intel documents for the 82571/82572 (#76), 82574
+(#17) and 82583V (#7): if the first buffer is larger than
+3 * (max_read_request - 4) bytes and a 4 KB boundary falls just after
+the headers, a read is repeated, wrong data goes out with a correct
+checksum, and the Tx DMA hangs. e1000e never implemented the documented
+workaround.
+
+Apply it to all e1000e parts: limit the first data descriptor of a TSO
+packet to 3 * (max_read_request - 4) bytes (372 on the I219, where
+pcie_get_readrq() returns 128). The rest of the linear part goes into
+the next descriptor, and the NIC still segments the packet.
+
+The split can take one descriptor more than before, which
+e1000_xmit_frame() already reserves: it counts one descriptor more than
+e1000_tx_map() uses, a leftover from e1000, which spends it on a 4-byte
+TSO sentinel that e1000e does not use. Comment that count.
+
+Tested on I219-LM (8086:15bb), v7.0.14, byte-verified traffic:
+
+                                        unpatched        patched
+  packets placed inside the window [1]  hang <12m        no hang
+  guest traffic, TCP timestamps on      hang <27m        60 min ok
+  guest traffic, TCP timestamps off     hang <7m         40 min ok
+  guest traffic, VLAN tag from stack    hang <20m        40 min ok
+
+  [1] 785-1013 packets at each of 10 offsets, 54- to 70-byte headers
+  "hang <Xm": every run hung, the slowest within X minutes
+
+Unpatched, data was corrupted at every hang. Patched, no corruption, no
+Tx timeouts or drops, and hardware TSO stayed in use (26.5M segments).
+
+Developed with an AI coding assistant (Claude); details below the cut.
+
+Fixes: bc7f75fa9788 ("[E1000E]: New pci-express e1000 driver (currently for ICH9 devices only)")
+Assisted-by: LLM
+Signed-off-by: Andre Brait <andrebrait@gmail.com>
+Reviewed-by: Aleksandr Loktionov <aleksandr.loktionov@intel.com>
+Link: https://lore.kernel.org/all/20261024004630.24579-1-andrebrait@gmail.com/
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/net/ethernet/intel/e1000e/e1000.h  |  1 +
+ drivers/net/ethernet/intel/e1000e/netdev.c | 14 ++++++++++++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/e1000.h b/drivers/net/ethernet/intel/e1000e/e1000.h
+index 63ebe00376f53f2f2ee314079f9a90e34ba9b3d7..704284188f23ff480722eb1beb4a848920b4dad3 100644
+--- a/drivers/net/ethernet/intel/e1000e/e1000.h
++++ b/drivers/net/ethernet/intel/e1000e/e1000.h
+@@ -219,6 +219,7 @@ struct e1000_adapter {
+ 	/* Tx - one ring per active queue */
+ 	struct e1000_ring *tx_ring ____cacheline_aligned_in_smp;
+ 	u32 tx_fifo_limit;
++	u32 tx_hdr_buf_max;
+ 
+ 	struct napi_struct napi;
+ 
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index 70e0d95eabdbb6d3a412a97948ec12acec46b15a..d8cf345d8f0513e630f0851642bfb9b9e7dd2ecd 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -4118,6 +4118,15 @@ void e1000e_reset(struct e1000_adapter *adapter)
+ 	adapter->tx_fifo_limit = min_t(u32, ((er32(PBA) >> 16) << 10) - 96,
+ 				       24 << 10);
+ 
++	/* TSO erratum (82571/82572 #76, 82574 #17, 82583V #7, also seen on
++	 * I219): when the first buffer of a TSO packet is larger than
++	 * 3 * (max_read_request - 4) bytes and a 4 KB boundary lies just
++	 * after its headers, the NIC repeats a read, sends wrong data with a
++	 * correct checksum and then hangs. Keep the headers in a first buffer
++	 * no larger than that.
++	 */
++	adapter->tx_hdr_buf_max = 3 * (pcie_get_readrq(adapter->pdev) - 4);
++
+ 	/* Disable Adaptive Interrupt Moderation if 2 full packets cannot
+ 	 * fit in receive buffer.
+ 	 */
+@@ -5605,6 +5614,8 @@ static int e1000_tx_map(struct e1000_ring *tx_ring, struct sk_buff *skb,
+ 	while (len) {
+ 		buffer_info = &tx_ring->buffer_info[i];
+ 		size = min(len, max_per_txd);
++		if (!offset && skb_is_gso(skb))
++			size = min(size, adapter->tx_hdr_buf_max);
+ 
+ 		buffer_info->length = size;
+ 		buffer_info->time_stamp = jiffies;
+@@ -5878,6 +5889,9 @@ static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb,
+ 	/* reserve a descriptor for the offload context */
+ 	if ((mss) || (skb->ip_summed == CHECKSUM_PARTIAL))
+ 		count++;
++	/* spare descriptor: e1000_tx_map() splits the linear part of a long
++	 * TSO packet to keep its headers within tx_hdr_buf_max (TSO erratum)
++	 */
+ 	count++;
+ 
+ 	count += DIV_ROUND_UP(len, adapter->tx_fifo_limit);
