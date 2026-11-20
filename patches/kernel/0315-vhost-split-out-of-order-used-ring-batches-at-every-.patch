@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: "Michael S. Tsirkin" <mst@redhat.com>
+Date: Fri, 6 Nov 2026 09:11:07 -0500
+Subject: [PATCH] vhost: split out-of-order used ring batches at every wrap
+
+When a completion batch larger than the remaining space in the used
+ring is added without VIRTIO_F_IN_ORDER, vhost_add_used_n_ooo() splits
+it at the ring boundary only once. vhost-net can batch up to
+VHOST_NET_BATCH TX completions, so with a queue smaller than half the
+batch the tail of the second chunk runs past the end of the used ring
+and into whatever follows it in the vhost owner's address space: with
+a 32 entry queue, last_used_idx % 32 == 3 and a 64 entry batch, three
+used entries are written past the ring.
+
+To fix, keep splitting the remaining batch at each wrap until it is
+exhausted.
+
+Cc: stable@vger.kernel.org
+Reported-by: Seohyeon Maeng <bioloidgp@gmail.com>
+Cc: minki@morningstarsec.dev
+Fixes: 2b3b35eb989 ("vhost_net: batch used ring update in rx")
+Fixes: 4afb52c2af44 ("vhost_net: batch update used ring for datacopy TX")
+Cc: Jason Wang <jasowangio@gmail.com>
+Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+(cherry picked from commit 5570a998b884c988dbe105430d7e2d8e9411e37e)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/vhost/vhost.c | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/vhost/vhost.c b/drivers/vhost/vhost.c
+index 6e72e72c3a178f3f313c895914037a29d91cb6cf..622d1e858f2f70afbf2df519b6fe63d0044be999 100644
+--- a/drivers/vhost/vhost.c
++++ b/drivers/vhost/vhost.c
+@@ -3104,18 +3104,21 @@ static int vhost_add_used_n_ooo(struct vhost_virtqueue *vq,
+ 				struct vring_used_elem *heads,
+ 				unsigned count)
+ {
+-	int start, n, r;
++	unsigned int n;
++	int r;
+ 
+-	start = vq->last_used_idx & (vq->num - 1);
+-	n = vq->num - start;
+-	if (n < count) {
++	do {
++		unsigned int start = vq->last_used_idx & (vq->num - 1);
++
++		n = min(vq->num - start, count);
+ 		r = __vhost_add_used_n(vq, heads, n);
+ 		if (r < 0)
+ 			return r;
+ 		heads += n;
+ 		count -= n;
+-	}
+-	return __vhost_add_used_n(vq, heads, count);
++	} while (count);
++
++	return 0;
+ }
+ 
+ static int vhost_add_used_n_in_order(struct vhost_virtqueue *vq,
