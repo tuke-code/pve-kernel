@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Thomas Lamprecht <t.lamprecht@proxmox.com>
+Date: Fri, 20 Nov 2026 11:24:47 +0100
+Subject: [PATCH] Revert "tracing: perf: Fix stale head for perf syscall
+ tracing"
+
+This reverts commit 501235c883b34, the backport of upstream commit
+2c2b322acdcc78575b8d6afa64a085cf92e03c12, which Ubuntu took from the
+7.1.y stable series.
+
+Upstream moved the BPF program call in perf_syscall_enter() before the
+per-CPU perf event check with commit 57918341dd19 ("bpf: Add sleepable
+support for classic tracepoint programs") in v7.2. The backported fix
+relies on that order: it returns early when the perf event list of the
+current CPU is empty.
+
+v7.0 still runs BPF programs after that point, so the early return
+skips BPF programs attached to sys_enter tracepoints of syscalls with
+user space pointer arguments on every CPU without its own perf event,
+for example execve and openat. Tools that attach such programs through
+a single perf event then see these syscalls only on one CPU.
+
+The stale head issue the backport fixes does not exist in v7.0, where
+perf_syscall_enter() reads the per-CPU head after the code that may
+migrate.
+
+Link: https://bugzilla.proxmox.com/show_bug.cgi?id=8332
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ kernel/trace/trace_syscalls.c | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/kernel/trace/trace_syscalls.c b/kernel/trace/trace_syscalls.c
+index ea6946d4c81abe22472e304ebd1b47c9a3f482fd..64b60e1d18eeb72660b3cd05f74eaf35c8315d6a 100644
+--- a/kernel/trace/trace_syscalls.c
++++ b/kernel/trace/trace_syscalls.c
+@@ -1437,11 +1437,6 @@ static void perf_syscall_enter(void *ignore, struct pt_regs *regs, long id)
+ 		if (syscall_get_data(sys_data, args, &user_ptr,
+ 				     &size, user_sizes, &uargs, buf_size) < 0)
+ 			return;
+-
+-		/* The above may have caused a migration */
+-		head = this_cpu_ptr(sys_data->enter_event->perf_events);
+-		if (hlist_empty(head))
+-			return;
+ 	}
+ 
+ 	head = this_cpu_ptr(sys_data->enter_event->perf_events);
