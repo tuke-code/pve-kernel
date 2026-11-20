@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Simon Schippers <simon.schippers@tu-dortmund.de>
+Date: Fri, 13 Nov 2026 11:46:47 +0100
+Subject: [PATCH] veth: wake a stopped peer txq beyond real_num_tx_queues
+
+Since commit dc82a33297fc ("veth: apply qdisc backpressure on full
+ptr_ring to reduce TX drops"), only the peer's veth_poll() wakes a txq
+that veth_xmit() stopped on a full ptr_ring. veth_poll() skips txqs at
+or above the peer's real_num_tx_queues.
+
+If the peer shrinks its TX channels while such a txq is stopped, nothing
+wakes it. netif_set_real_num_tx_queues() keeps its state, so once the
+channels are grown back, its first skb is requeued forever. With a single
+root qdisc this blocks all transmission of the device.
+
+Look the txq up below num_tx_queues instead. Waking a txq that is not in
+use is harmless.
+
+Reproduced in virtme-ng with a UDP flood from veth0 into veth1, which has
+GRO, while switching veth0 between one and two TX channels: without this
+patch veth0 stopped transmitting within 11 cycles in 3 of 3 runs, with
+it veth0 kept transmitting through 30 cycles in 3 of 3 runs.
+
+Fixes: 08f566e8f83b ("veth: fix OOB txq access in veth_poll() with asymmetric queue counts")
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+Reviewed-by: Tianyi Gao <tianyi@cloudflare.com>
+Tested-by: Tianyi Gao <tianyi@cloudflare.com>
+Link: https://patch.msgid.link/20261113104648.225983-2-simon.schippers@tu-dortmund.de
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+(cherry picked from commit 8a0b03058ff700deb74f4b38f5a254238bdf4e07)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/net/veth.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/veth.c b/drivers/net/veth.c
+index 4f145c5f686ef05c4d926ac2e5a4fdd3eef3b4f6..0a101e1bbc9a419cc60c8b5d380a33cf560115bc 100644
+--- a/drivers/net/veth.c
++++ b/drivers/net/veth.c
+@@ -978,7 +978,7 @@ static int veth_poll(struct napi_struct *napi, int budget)
+ 
+ 	/* NAPI functions as RCU section */
+ 	peer_dev = rcu_dereference_check(priv->peer, rcu_read_lock_bh_held());
+-	peer_txq = (peer_dev && queue_idx < peer_dev->real_num_tx_queues) ?
++	peer_txq = (peer_dev && queue_idx < peer_dev->num_tx_queues) ?
+ 		   netdev_get_tx_queue(peer_dev, queue_idx) : NULL;
+ 
+ 	xdp_set_return_frame_no_direct();

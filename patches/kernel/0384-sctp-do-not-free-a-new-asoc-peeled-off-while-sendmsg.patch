@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yves Bieri <yves.bieri@theori.io>
+Date: Thu, 12 Nov 2026 18:21:49 +0100
+Subject: [PATCH] sctp: do not free a new asoc peeled off while sendmsg slept
+
+When sctp_sendmsg() creates a new association and sending on it fails
+with anything but -ESRCH, it frees the association. The send can
+sleep in sctp_wait_for_sndbuf(), which releases the socket lock, and
+meanwhile another thread can peel the new association off to a new
+socket. The wait then returns -EPIPE, and sctp_sendmsg() frees an
+association that now belongs to the peeled-off socket, without holding
+that socket's lock.
+
+If the peeled-off socket frees the association first, e.g. on close(),
+sctp_sendmsg() frees it a second time. Otherwise a syscall running
+concurrently on the peeled-off socket can use it after sctp_sendmsg()
+freed it. Both are reachable by an unprivileged user. The double free
+on net with KASAN:
+
+  BUG: KASAN: double-free in sctp_tsnmap_free+0x5c/0x80
+   sctp_association_free+0x1eb/0x750
+   sctp_sendmsg+0x15ff/0x2020
+  Freed by task 836:
+   sctp_association_free+0x1eb/0x750
+   sctp_primitive_ABORT+0x85/0xe0
+   sctp_close+0x22a/0x8d0
+
+Commit dfcb9f4f99f1 ("sctp: deny peeloff operation on asocs with threads
+sleeping on it") fixed this double free by denying the peeloff.
+Commit cea0cc80a677 ("sctp: use the right sk after waking up from
+wait_buf sleep") replaced that check, and commit a0ff660058b8 ("sctp:
+return error if the asoc has been peeled off in sctp_wait_for_sndbuf")
+reverted it to return -EPIPE, without restoring the check.
+
+Fix this by holding a reference on the new association while sending
+on it, and by freeing it on error only if this socket still owns it.
+asoc->base.sk only changes in sctp_sock_migrate(), which runs with this
+socket locked, so the ownership check is stable. The reference keeps
+the check safe if the new owner frees the association meanwhile.
+Userspace still gets -EPIPE, and the association stays with the socket
+it was peeled off to.
+
+This was found by Xint Code, an AI code review agent, and reproduced as
+an unprivileged user on net with KASAN (trace above), without modifying
+the kernel or using error injection. With this patch the sender gets
+-EPIPE and the association keeps working on the peeled-off socket.
+Without a peeloff, a failed send that created the association (EAGAIN,
+EINTR) still frees it, and a peer ABORT while the sender sleeps still
+frees it exactly once. The SCTP selftest sctp_vrf.sh passes. The
+reproducer is available on request.
+
+Fixes: a0ff660058b8 ("sctp: return error if the asoc has been peeled off in sctp_wait_for_sndbuf")
+Cc: stable@vger.kernel.org
+Signed-off-by: Yves Bieri <yves.bieri@theori.io>
+Acked-by: Xin Long <lucien.xin@gmail.com>
+Link: https://patch.msgid.link/20261112172149.27355-1-yves.bieri@theori.io
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+(cherry picked from commit f2540da93a113d3f0a70fd0961e00eb849ce8342)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ net/sctp/socket.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/net/sctp/socket.c b/net/sctp/socket.c
+index 8e647737b2567db2849abe7eadd45de0ed959c16..bc68af88e271042f90f438cd0903e86712650872 100644
+--- a/net/sctp/socket.c
++++ b/net/sctp/socket.c
+@@ -2063,6 +2063,11 @@ static int sctp_sendmsg(struct sock *sk, struct msghdr *msg, size_t msg_len)
+ 
+ 			asoc = transport->asoc;
+ 			new = true;
++			/* sctp_sendmsg_to_asoc() may release the socket lock,
++			 * and the new asoc can be peeled off meanwhile.  Hold
++			 * it, and free it on error only if sk still owns it.
++			 */
++			sctp_association_hold(asoc);
+ 		}
+ 
+ 		if (!sctp_style(sk, TCP) && !(sflags & SCTP_ADDR_OVER))
+@@ -2084,8 +2089,11 @@ static int sctp_sendmsg(struct sock *sk, struct msghdr *msg, size_t msg_len)
+ 
+ 	/* Send msg to the asoc */
+ 	err = sctp_sendmsg_to_asoc(asoc, msg, msg_len, transport, sinfo);
+-	if (err < 0 && err != -ESRCH && new)
+-		sctp_association_free(asoc);
++	if (new) {
++		if (err < 0 && err != -ESRCH && asoc->base.sk == sk)
++			sctp_association_free(asoc);
++		sctp_association_put(asoc);
++	}
+ 
+ out_unlock:
+ 	release_sock(sk);

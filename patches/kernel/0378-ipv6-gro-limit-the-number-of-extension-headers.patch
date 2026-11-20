@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eric Dumazet <edumazet@kernel.org>
+Date: Fri, 13 Nov 2026 13:46:21 +0100
+Subject: [PATCH] ipv6: gro: limit the number of extension headers
+
+Hyunwoo Kim reported that a long chain of IPv6 extension headers
+can push the transport header offset of a GRO packet beyond what
+the 16-bit skb->transport_header can store. The truncated offset
+is later used by gro_receive_network_flush() to locate the network
+header of a packet held in the GRO list, leading to an out-of-bounds
+read.
+
+Since commit 3744b0964d52 ("ipv6: Implement limits on extension header
+parsing"), ip6_protocol_deliver_rcu() drops packets carrying more than
+IP6_MAX_EXT_HDRS_CNT extension headers, but ipv6_gro_pull_exthdrs()
+was left unbounded.
+
+There is no point trying to aggregate packets that the stack is going
+to drop anyway if they are locally delivered. Apply the same limit in
+ipv6_gro_pull_exthdrs().
+
+When the limit is hit, @proto still designates an extension header.
+Extension header offloads have no gro_receive() callback, so
+ipv6_gro_receive() takes its existing "goto out" path with flush set,
+and the packet is given to the normal receive path. Local delivery
+drops it with SKB_DROP_REASON_IPV6_TOO_MANY_EXTHDRS, while forwarded
+packets are simply not aggregated.
+
+An extension header being at most 2048 bytes, this bounds a chain
+to 24576 bytes.
+
+Note that offsets can still accumulate over nested encapsulations,
+so the places storing them should be hardened separately.
+
+Fixes: 4b0ebbca3e16 ("net: gro: move L3 flush checks to tcp_gro_receive and udp_gro_receive_segment")
+Cc: stable@vger.kernel.org
+Reported-by: Hyunwoo Kim <imv4bel@gmail.com>
+Link: https://lore.kernel.org/netdev/avTTQNyvwPP6LtGx@v4bel/
+Signed-off-by: Eric Dumazet <edumazet@kernel.org>
+Cc: Daniel Borkmann <daniel@iogearbox.net>
+Cc: David Ahern <dsahern@kernel.org>
+Cc: Ido Schimmel <idosch@nvidia.com>
+Tested-by: Hyunwoo Kim <imv4bel@gmail.com>
+Reviewed-by: Ido Schimmel <idosch@nvidia.com>
+Reviewed-by: Aaron Conole <aconole@redhat.com>
+Link: https://patch.msgid.link/20261113124625.4010206-2-edumazet@kernel.org
+Reviewed-by: Justin Iurman <justin.iurman@gmail.com>
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+(cherry picked from commit 050f2adb60434a2b4dee2cf3350269379a32cf72)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ net/ipv6/ip6_offload.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/net/ipv6/ip6_offload.c b/net/ipv6/ip6_offload.c
+index 9b511703df44dbc339d60523f072db4d2ac85997..0e91440c1b86d71b5c2ac7da36b510a10f58f676 100644
+--- a/net/ipv6/ip6_offload.c
++++ b/net/ipv6/ip6_offload.c
+@@ -26,6 +26,7 @@ static int ipv6_gro_pull_exthdrs(struct sk_buff *skb, int off, int proto)
+ {
+ 	const struct net_offload *ops = NULL;
+ 	struct ipv6_opt_hdr *opth;
++	int exthdr_cnt = 0;
+ 
+ 	for (;;) {
+ 		int len;
+@@ -38,6 +39,13 @@ static int ipv6_gro_pull_exthdrs(struct sk_buff *skb, int off, int proto)
+ 		if (!(ops->flags & INET6_PROTO_GSO_EXTHDR))
+ 			break;
+ 
++		/* Same limit as ip6_protocol_deliver_rcu().
++		 * @proto is left pointing to an extension header,
++		 * so that the caller does not aggregate this packet.
++		 */
++		if (unlikely(exthdr_cnt++ >= IP6_MAX_EXT_HDRS_CNT))
++			break;
++
+ 		opth = skb_gro_header(skb, off + sizeof(*opth), off);
+ 		if (unlikely(!opth))
+ 			break;

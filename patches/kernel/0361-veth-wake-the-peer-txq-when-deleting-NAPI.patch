@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Simon Schippers <simon.schippers@tu-dortmund.de>
+Date: Fri, 13 Nov 2026 11:46:48 +0100
+Subject: [PATCH] veth: wake the peer txq when deleting NAPI
+
+Since commit dc82a33297fc ("veth: apply qdisc backpressure on full
+ptr_ring to reduce TX drops"), only the peer's veth_poll() wakes a txq
+that veth_xmit() stopped on a full ptr_ring.
+
+If veth_xmit() stops the txq after the last poll before napi_disable(),
+its __veth_xdp_flush() can no longer schedule NAPI. Nothing wakes the
+txq, also not after NAPI is added back, so the device stops transmitting
+for good. This can happen whenever the peer deletes its NAPI: when it
+goes down, turns GRO off, detaches XDP or reduces its RX channels.
+
+Wake the peer txq in veth_napi_del_range() once NAPI is deleted, also
+when the peer is down, as opening it does not restart its queues.
+
+Reproduced in virtme-ng with a pktgen flood while toggling GRO on the
+peer, with a udelay() before netif_tx_stop_queue() to widen the race:
+the txq got stuck within four toggles without this patch, and not in 300
+with it. Without the udelay() it was not hit in 1200 toggles.
+
+Fixes: dc82a33297fc ("veth: apply qdisc backpressure on full ptr_ring to reduce TX drops")
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+Reviewed-by: Tianyi Gao <tianyi@cloudflare.com>
+Tested-by: Tianyi Gao <tianyi@cloudflare.com>
+Link: https://patch.msgid.link/20261113104648.225983-3-simon.schippers@tu-dortmund.de
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+(cherry picked from commit b2f4c44d7d83770ee1f235a732d8e1fd831c4926)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/net/veth.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/net/veth.c b/drivers/net/veth.c
+index 0a101e1bbc9a419cc60c8b5d380a33cf560115bc..c02094473c44ea72b2097b474d13e9181f5ceee0 100644
+--- a/drivers/net/veth.c
++++ b/drivers/net/veth.c
+@@ -1081,6 +1081,7 @@ static int __veth_napi_enable(struct net_device *dev)
+ static void veth_napi_del_range(struct net_device *dev, int start, int end)
+ {
+ 	struct veth_priv *priv = netdev_priv(dev);
++	struct net_device *peer;
+ 	int i;
+ 
+ 	for (i = start; i < end; i++) {
+@@ -1093,11 +1094,17 @@ static void veth_napi_del_range(struct net_device *dev, int start, int end)
+ 	}
+ 	synchronize_net();
+ 
++	peer = rtnl_dereference(priv->peer);
++
+ 	for (i = start; i < end; i++) {
+ 		struct veth_rq *rq = &priv->rq[i];
+ 
+ 		rq->rx_notify_masked = false;
+ 		ptr_ring_cleanup(&rq->xdp_ring, veth_ptr_free);
++
++		/* veth_poll() can no longer wake a txq stopped on a full ring */
++		if (peer && i < peer->num_tx_queues)
++			netif_wake_subqueue(peer, i);
+ 	}
+ 
+ 	for (i = start; i < end; i++) {

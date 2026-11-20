@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris J Arges <carges@cloudflare.com>
+Date: Wed, 18 Nov 2026 08:32:27 -0600
+Subject: [PATCH] net: prevent receive header offset overflow during
+ decapsulation
+
+Repeated decapsulation can leave skb->data far from skb->head while
+the remaining packet data is still valid. Since the skb header positions
+are 16-bit offsets, a later header update can truncate and make header
+access use unrelated bytes and eventually crash.
+
+Limit receive headroom to 32 KiB. This is well beyond the headroom of
+normal packets while allowing the networking stack to pull enough
+headers in a single pass without overflowing 16-bit header offsets.
+
+Tunnel decapsulation re-enters __netif_receive_skb_core(), so its check
+protects nested IPIP and GRE. FOU and GUE bypass receive core, so check
+their IPv4 and IPv6 resubmission paths too. Together, these checks
+prevent 16-bit header-offset truncation in cases of repeated
+decapsulation.
+
+Report these rejections with the SKB_RX_HEADROOM drop reason.
+
+Fixes: 1a37e412a022 ("net: Use 16bits for *_headers fields of struct skbuff")
+Cc: stable@kernel.org
+Suggested-by: Eric Dumazet <edumazet@kernel.org>
+Signed-off-by: Chris J Arges <carges@cloudflare.com>
+Reviewed-by: Ido Schimmel <idosch@nvidia.com>
+Link: https://patch.msgid.link/20261118-prevent_rx_header_offset_overflow-v1-1-92a5be55f994@cloudflare.com
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+(cherry picked from commit b10c986f1769287270de248548476f6dc2275d59)
+[TL: adapted context in dropreason-core.h, where the RECURSION_LIMIT
+ documentation is a one-line comment]
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ include/linux/skbuff.h        | 1 +
+ include/net/dropreason-core.h | 6 ++++++
+ net/core/dev.c                | 4 ++++
+ net/ipv4/ip_input.c           | 6 ++++++
+ net/ipv6/ip6_input.c          | 4 ++++
+ 5 files changed, 21 insertions(+)
+
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 1c10ad8fe2b8f4953e3aa8bf34c5017a93662b75..73a976230a3a5a873366e709d4cbde85d8c7a7f1 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -268,6 +268,7 @@
+ 	SKB_WITH_OVERHEAD((PAGE_SIZE << (ORDER)) - (X))
+ #define SKB_MAX_HEAD(X)		(SKB_MAX_ORDER((X), 0))
+ #define SKB_MAX_ALLOC		(SKB_MAX_ORDER(0, 2))
++#define SKB_MAX_RX_HEADROOM	(U16_MAX / 2)
+ 
+ /* return minimum truesize of one skb containing X bytes of data */
+ #define SKB_TRUESIZE(X) ((X) +						\
+diff --git a/include/net/dropreason-core.h b/include/net/dropreason-core.h
+index 3b0dc7a92700b01a21ff706569880d384b0cce2e..325be77bcf769513d16d4081caf5b7f64115eb85 100644
+--- a/include/net/dropreason-core.h
++++ b/include/net/dropreason-core.h
+@@ -133,6 +133,7 @@
+ 	FN(PSP_INPUT)			\
+ 	FN(PSP_OUTPUT)			\
+ 	FN(RECURSION_LIMIT)		\
++	FN(SKB_RX_HEADROOM)		\
+ 	FNe(MAX)
+ 
+ /**
+@@ -634,6 +635,11 @@ enum skb_drop_reason {
+ 	SKB_DROP_REASON_PSP_OUTPUT,
+ 	/** @SKB_DROP_REASON_RECURSION_LIMIT: Dead loop on virtual device. */
+ 	SKB_DROP_REASON_RECURSION_LIMIT,
++	/**
++	 * @SKB_DROP_REASON_SKB_RX_HEADROOM: accumulated receive headroom
++	 * exceeds the header-offset budget.
++	 */
++	SKB_DROP_REASON_SKB_RX_HEADROOM,
+ 	/**
+ 	 * @SKB_DROP_REASON_MAX: the maximum of core drop reasons, which
+ 	 * shouldn't be used as a real 'reason' - only for tracing code gen
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 6c6beab731fdfe257d5534cf208a72474276d1d2..c4c50532272a4e702925a188d207aaa16b272486 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -6072,6 +6072,10 @@ static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
+ 	trace_netif_receive_skb(skb);
+ 
+ 	orig_dev = skb->dev;
++	if (unlikely(skb_headroom(skb) > SKB_MAX_RX_HEADROOM)) {
++		drop_reason = SKB_DROP_REASON_SKB_RX_HEADROOM;
++		goto drop;
++	}
+ 
+ 	skb_reset_network_header(skb);
+ #if !defined(CONFIG_DEBUG_NET)
+diff --git a/net/ipv4/ip_input.c b/net/ipv4/ip_input.c
+index 19d3141dad1f8b031981aea40c311509583e9256..0d97ebc3cf75180859ec9796fad5778136eb159b 100644
+--- a/net/ipv4/ip_input.c
++++ b/net/ipv4/ip_input.c
+@@ -207,6 +207,12 @@ void ip_protocol_deliver_rcu(struct net *net, struct sk_buff *skb, int protocol)
+ 		ret = INDIRECT_CALL_2(ipprot->handler, tcp_v4_rcv, udp_rcv,
+ 				      skb);
+ 		if (ret < 0) {
++			if (unlikely(skb_headroom(skb) > SKB_MAX_RX_HEADROOM)) {
++				__IP_INC_STATS(net, IPSTATS_MIB_INDISCARDS);
++				kfree_skb_reason(skb,
++						 SKB_DROP_REASON_SKB_RX_HEADROOM);
++				return;
++			}
+ 			protocol = -ret;
+ 			goto resubmit;
+ 		}
+diff --git a/net/ipv6/ip6_input.c b/net/ipv6/ip6_input.c
+index be8836cc70e73755ba9f73a0014b1ee102ab2817..ac32a84103ae68c80116d063a6e676d0658a272f 100644
+--- a/net/ipv6/ip6_input.c
++++ b/net/ipv6/ip6_input.c
+@@ -439,6 +439,10 @@ void ip6_protocol_deliver_rcu(struct net *net, struct sk_buff *skb, int nexthdr,
+ 		ret = INDIRECT_CALL_2(ipprot->handler, tcp_v6_rcv, udpv6_rcv,
+ 				      skb);
+ 		if (ret > 0) {
++			if (unlikely(skb_headroom(skb) > SKB_MAX_RX_HEADROOM)) {
++				SKB_DR_SET(reason, SKB_RX_HEADROOM);
++				goto discard;
++			}
+ 			if (ipprot->flags & INET6_PROTO_FINAL) {
+ 				/* Not an extension header, most likely UDP
+ 				 * encapsulation. Use return value as nexthdr

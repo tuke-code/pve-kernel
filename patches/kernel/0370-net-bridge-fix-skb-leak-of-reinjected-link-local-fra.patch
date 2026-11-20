@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Daniel Wade <danjwade95@gmail.com>
+Date: Sun, 15 Nov 2026 23:32:11 +1030
+Subject: [PATCH] net: bridge: fix skb leak of reinjected link-local frames
+
+br_handle_frame() passes the link-local frames it neither forwards nor
+delivers (01:80:c2:00:00:02 to 0d and 0f, unless set in the group
+forward mask) through NF_HOOK() at NF_BR_LOCAL_IN. Since commit
+3b2e2904deb3 ("net: bridge: fix per-port af_packet sockets") the okfn
+only learns the source and returns 1, which becomes RX_HANDLER_PASS.
+
+That commit sent the nf_queue case to RX_HANDLER_CONSUMED, which is
+right for the synchronous return, but the frame comes back: on
+reinjection nf_reinject() calls the okfn and ignores its return value,
+because every other okfn consumes the skb. This one no longer does, so
+nothing frees the frame. NFQA_CFG_F_FAIL_OPEN leaks it the same way
+with no verdict at all, when the queue or the listener's socket is full.
+
+Each frame leaks an skb, and one sent from a local socket keeps that
+socket charged, so neither it nor the network namespace holding it is
+freed. Bridge, rule and queue need only CAP_NET_ADMIN in a netns, so
+with user namespaces an unprivileged user can exhaust kernel memory.
+
+nf_reinject() cannot free the skb on a 1 from the okfn, because other
+okfns return NET_RX_DROP, which is 1, after freeing it.
+
+Call nf_hook() instead of NF_HOOK() and do the learning and the
+RX_HANDLER_PASS return in br_handle_frame() on 1, as the 0x00 and 0x0e
+cases already do and as vrf_rcv_nfhook() does. The okfn then runs only
+for a reinjected frame, which br_handle_frame() has already reported
+consumed and cannot pass on the port, so it learns from the frame and
+frees it. These frames were not delivered before this change either.
+
+Also set *pskb before the new RX_HANDLER_PASS, as the other such
+returns do; skb_share_check() may have replaced the skb, and the commit
+above added that return without the assignment.
+
+Discovered by an AI code review agent and reproduced on unmodified
+mainline under KASAN: an unprivileged user in a new user and network
+namespace bridged a veth, queued link-local frames to an NFQUEUE
+listener that accepted every one, and leaked an skb per frame. With
+this patch the reinjected frames are freed and nothing leaks.
+
+Fixes: 3b2e2904deb3 ("net: bridge: fix per-port af_packet sockets")
+Cc: stable@vger.kernel.org
+Signed-off-by: Daniel Wade <danjwade95@gmail.com>
+Reviewed-by: Xia Yan <yanxia@cmss.chinamobile.com>
+Acked-by: Nikolay Aleksandrov <razor@blackwall.org>
+Link: https://patch.msgid.link/20261115130211.7724-1-danjwade95@gmail.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+(cherry picked from commit 98382d41f92f048cf3cbb7af415f48a722b19ebc)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ net/bridge/br_input.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/net/bridge/br_input.c b/net/bridge/br_input.c
+index ac0f56076e93b18bdcfa6b92f85bc754e6ccd039..b0cad4dbc8ce03823dbcbbcbbd03f71763299efb 100644
+--- a/net/bridge/br_input.c
++++ b/net/bridge/br_input.c
+@@ -255,13 +255,18 @@ static void __br_handle_local_finish(struct sk_buff *skb)
+ 		br_fdb_update(p->br, p, eth_hdr(skb)->h_source, vid, 0);
+ }
+ 
+-/* note: already called with rcu_read_lock */
++/* okfn of the link-local NF_BR_LOCAL_IN hook in br_handle_frame(). It is
++ * only called when a queued frame is reinjected, after br_handle_frame()
++ * returned RX_HANDLER_CONSUMED for it, so the frame can no longer be
++ * passed up on the port and has to be freed here.
++ * note: already called with rcu_read_lock
++ */
+ static int br_handle_local_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
+ {
+ 	__br_handle_local_finish(skb);
++	kfree_skb(skb);
+ 
+-	/* return 1 to signal the okfn() was called so it's ok to use the skb */
+-	return 1;
++	return 0;
+ }
+ 
+ static int nf_hook_bridge_pre(struct sk_buff *skb, struct sk_buff **pskb)
+@@ -422,11 +427,14 @@ static rx_handler_result_t br_handle_frame(struct sk_buff **pskb)
+ 		/* The else clause should be hit when nf_hook():
+ 		 *   - returns < 0 (drop/error)
+ 		 *   - returns = 0 (stolen/nf_queue)
+-		 * Thus return 1 from the okfn() to signal the skb is ok to pass
++		 * On 1 the frame is passed on here. The okfn() only runs if a
++		 * queued frame is reinjected later, and must consume it then.
+ 		 */
+-		if (NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_IN,
++		if (nf_hook(NFPROTO_BRIDGE, NF_BR_LOCAL_IN,
+ 			    dev_net(skb->dev), NULL, skb, skb->dev, NULL,
+ 			    br_handle_local_finish) == 1) {
++			*pskb = skb;
++			__br_handle_local_finish(skb);
+ 			return RX_HANDLER_PASS;
+ 		} else {
+ 			return RX_HANDLER_CONSUMED;
