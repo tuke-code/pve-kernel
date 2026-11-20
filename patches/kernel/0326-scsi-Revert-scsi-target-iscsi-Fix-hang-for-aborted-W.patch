@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dmitry Bogdanov <d.bogdanov@yadro.com>
+Date: Tue, 27 Oct 2026 21:01:22 +0300
+Subject: [PATCH] scsi: Revert "scsi: target: iscsi: Fix hang for aborted
+ WRITE_PENDING commands"
+
+This reverts commit d5869dae5080e976d4b03cc33eb7ceb527f242bf as it
+introduces double completion of the command and other issues.
+
+Signed-off-by: Dmitry Bogdanov <d.bogdanov@yadro.com>
+Reviewed-by: Laurence Oberman <loberman@redhat.com>
+Tested-by: Laurence Oberman <loberman@redhat.com>
+Link: https://patch.msgid.link/20261027180123.13163-2-d.bogdanov@yadro.com
+Signed-off-by: Martin K. Petersen (Oracle) <mkp@kernel.org>
+(cherry picked from commit 94196cd3413fba6cf6d1f71d6de401e56caaf29b)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/target/iscsi/iscsi_target.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/drivers/target/iscsi/iscsi_target.c b/drivers/target/iscsi/iscsi_target.c
+index 01be0551193b9d2d3496462ad9d475b94671b385..f3b7569f49dac2d72352f034ffff0605cf894f8e 100644
+--- a/drivers/target/iscsi/iscsi_target.c
++++ b/drivers/target/iscsi/iscsi_target.c
+@@ -1519,10 +1519,8 @@ __iscsit_check_dataout_hdr(struct iscsit_conn *conn, void *buf,
+ 		 */
+ 		if (se_cmd->transport_state & CMD_T_ABORTED) {
+ 			if (hdr->flags & ISCSI_FLAG_CMD_FINAL &&
+-			    --cmd->outstanding_r2ts < 1) {
++			    --cmd->outstanding_r2ts < 1)
+ 				iscsit_stop_dataout_timer(cmd);
+-				target_complete_cmd(se_cmd, SAM_STAT_TASK_ABORTED);
+-			}
+ 
+ 			return iscsit_dump_data_payload(conn, payload_length, 1);
+ 		}

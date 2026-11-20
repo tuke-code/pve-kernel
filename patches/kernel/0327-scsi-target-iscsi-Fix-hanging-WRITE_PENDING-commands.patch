@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dmitry Bogdanov <d.bogdanov@yadro.com>
+Date: Tue, 27 Oct 2026 21:01:23 +0300
+Subject: [PATCH] scsi: target: iscsi: Fix hanging WRITE_PENDING commands
+
+When Data comes for an aborted WRITE command in WRITE_PENDING state it
+is silently received and the command does not pass to the target. That
+leads to hanging of other session with LUN_RESET aborting that command.
+
+Pass the aborted WRITE commands when all Data has been gathered.
+
+Signed-off-by: Dmitry Bogdanov <d.bogdanov@yadro.com>
+Reviewed-by: Laurence Oberman <loberman@redhat.com>
+Tested-by: Laurence Oberman <loberman@redhat.com>
+Link: https://patch.msgid.link/20261027180123.13163-3-d.bogdanov@yadro.com
+Signed-off-by: Martin K. Petersen (Oracle) <mkp@kernel.org>
+(cherry picked from commit cae8db99f3956e6446827ae4a9605a1ed815772b)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/target/iscsi/iscsi_target.c      | 17 -----------------
+ drivers/target/iscsi/iscsi_target_erl1.c |  8 --------
+ 2 files changed, 25 deletions(-)
+
+diff --git a/drivers/target/iscsi/iscsi_target.c b/drivers/target/iscsi/iscsi_target.c
+index f3b7569f49dac2d72352f034ffff0605cf894f8e..efae8ecfaa624e82d77b91fe22642d6109667082 100644
+--- a/drivers/target/iscsi/iscsi_target.c
++++ b/drivers/target/iscsi/iscsi_target.c
+@@ -1504,23 +1504,6 @@ __iscsit_check_dataout_hdr(struct iscsit_conn *conn, void *buf,
+ 			if (hdr->flags & ISCSI_FLAG_CMD_FINAL)
+ 				iscsit_stop_dataout_timer(cmd);
+ 
+-			return iscsit_dump_data_payload(conn, payload_length, 1);
+-		}
+-	} else {
+-		/*
+-		 * For the normal solicited data path:
+-		 *
+-		 * Check for a delayed TASK_ABORTED status and dump any
+-		 * incoming data out payload if one exists.  Also, when the
+-		 * ISCSI_FLAG_CMD_FINAL is set to denote the end of the current
+-		 * data out sequence, we decrement outstanding_r2ts.  Once
+-		 * outstanding_r2ts reaches zero, go ahead and send the delayed
+-		 * TASK_ABORTED status.
+-		 */
+-		if (se_cmd->transport_state & CMD_T_ABORTED) {
+-			if (hdr->flags & ISCSI_FLAG_CMD_FINAL &&
+-			    --cmd->outstanding_r2ts < 1)
+-				iscsit_stop_dataout_timer(cmd);
+ 
+ 			return iscsit_dump_data_payload(conn, payload_length, 1);
+ 		}
+diff --git a/drivers/target/iscsi/iscsi_target_erl1.c b/drivers/target/iscsi/iscsi_target_erl1.c
+index d8ca06e697d63f3f8dc202085a075d2d965f9f2c..44b851e4a602d822f8ef96bcbe048d3d9e818b37 100644
+--- a/drivers/target/iscsi/iscsi_target_erl1.c
++++ b/drivers/target/iscsi/iscsi_target_erl1.c
+@@ -908,8 +908,6 @@ int iscsit_execute_cmd(struct iscsit_cmd *cmd, int ooo)
+ 				return 0;
+ 			}
+ 			spin_unlock_bh(&cmd->istate_lock);
+-			if (cmd->se_cmd.transport_state & CMD_T_ABORTED)
+-				return 0;
+ 			return transport_send_check_condition_and_sense(se_cmd,
+ 					cmd->sense_reason, 0);
+ 		}
+@@ -927,9 +925,6 @@ int iscsit_execute_cmd(struct iscsit_cmd *cmd, int ooo)
+ 
+ 			if (!(cmd->cmd_flags &
+ 					ICF_NON_IMMEDIATE_UNSOLICITED_DATA)) {
+-				if (cmd->se_cmd.transport_state & CMD_T_ABORTED)
+-					return 0;
+-
+ 				iscsit_set_dataout_sequence_values(cmd);
+ 				conn->conn_transport->iscsit_get_dataout(conn, cmd, false);
+ 			}
+@@ -942,9 +937,6 @@ int iscsit_execute_cmd(struct iscsit_cmd *cmd, int ooo)
+ 
+ 		if ((cmd->data_direction == DMA_TO_DEVICE) &&
+ 		    !(cmd->cmd_flags & ICF_NON_IMMEDIATE_UNSOLICITED_DATA)) {
+-			if (cmd->se_cmd.transport_state & CMD_T_ABORTED)
+-				return 0;
+-
+ 			iscsit_set_unsolicited_dataout(cmd);
+ 		}
+ 		return target_submit(&cmd->se_cmd);
