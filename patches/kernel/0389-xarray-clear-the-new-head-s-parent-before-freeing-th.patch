@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nickolai Zeldovich <nickolai@csail.mit.edu>
+Date: Tue, 27 Oct 2026 15:20:14 -0400
+Subject: [PATCH] xarray: clear the new head's parent before freeing the old
+ head
+
+xas_shrink() passes the old head to xa_node_free(), which queues it with
+call_rcu(), before it clears the new head's parent pointer.  A lockless
+walker that loads the new head after the grace period has started can
+still climb from it into the old head through xa_parent(), as xas_find(),
+xas_find_marked(), xas_next() and xas_prev() do when they step past the
+end of a node, and read the old head after it is freed.
+
+Clear the parent pointer before freeing the old head, as
+radix_tree_shrink() does.
+
+With a delay injected after xa_node_free() in xas_shrink(), KASAN reports
+a slab-use-after-free in the walker; with this patch it does not.
+
+Link: https://lore.kernel.org/20261027192014.844878-1-nickolai@csail.mit.edu
+Fixes: 58d6ea3085f2 ("xarray: Add XArray unconditional store operations")
+Signed-off-by: Nickolai Zeldovich <nickolai@csail.mit.edu>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Cc: Matthew Wilcox (Oracle) <willy@infradead.org>
+(cherry picked from commit 9378306c5d3db7e733d60a8b85a22b2b143ecffd)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ lib/xarray.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/lib/xarray.c b/lib/xarray.c
+index 3913c8d6486bb16167bb54b9a93039d70c357c18..48f440d114e15f45e34456d14b86491dfc7570c9 100644
+--- a/lib/xarray.c
++++ b/lib/xarray.c
+@@ -471,11 +471,12 @@ static void xas_shrink(struct xa_state *xas)
+ 		if (!xa_is_node(entry))
+ 			RCU_INIT_POINTER(node->slots[0], XA_RETRY_ENTRY);
+ 		xas_update(xas, node);
++		if (xa_is_node(entry))
++			xa_to_node(entry)->parent = NULL;
+ 		xa_node_free(node);
+ 		if (!xa_is_node(entry))
+ 			break;
+ 		node = xa_to_node(entry);
+-		node->parent = NULL;
+ 	}
+ }
+ 

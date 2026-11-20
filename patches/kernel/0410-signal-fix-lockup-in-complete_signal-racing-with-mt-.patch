@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Oleg Nesterov <oleg@redhat.com>
+Date: Sat, 31 Oct 2026 14:46:57 +0100
+Subject: [PATCH] signal: fix lockup in complete_signal() racing with mt exec
+
+Nickolai Zeldovich says:
+
+    kill(2) of a process while a non-leader thread of it is in execve()
+    can lock up the machine: complete_signal() loops forever with siglock
+    held and interrupts off, and de_thread() then spins on siglock in
+    release_task() with tasklist_lock held.
+
+    The curr_target walk uses next_thread(), which wraps from the last
+    thread to ->group_leader on the assumption that the leader is first
+    on signal->thread_head. de_thread() makes the exec'ing thread, the
+    last one, the leader before release_task() unlinks the old leader,
+    so a walk that starts at the old leader stays on the new one if
+    that thread blocks the signal, and never gets back to curr_target.
+
+Change complete_signal() to use list_next_entry_circular() instead
+of next_thread().
+
+Other users of next_thread/while_each_thread/for_other_threads look safe,
+so this patch only changes complete_signal() to make a simple fix for
+-stable. However, in the longer term we should update next_thread()
+or add another helper, but this needs more work; next_thread() should
+work even when signal->thread_head is empty.
+
+Fixes: d639cf4abb4d ("change next_thread() to use __next_thread() ?: group_leader")
+Reported-by: Nickolai Zeldovich <nickolai@csail.mit.edu>
+Link: https://lore.kernel.org/all/CADGQE7EusFrrSoBnhXhdE20tZJrp1EDe=2623mS8vEMY9hn53A@mail.gmail.com/
+Originally-by: Nickolai Zeldovich <nickolai@csail.mit.edu>
+Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+Link: https://patch.msgid.link/auXxUSMHCh4vA3yV@redhat.com
+Tested-by: Nickolai Zeldovich <nickolai@csail.mit.edu>
+Reviewed-by: Nickolai Zeldovich <nickolai@csail.mit.edu>
+Signed-off-by: Christian Brauner (Amutable) <brauner@kernel.org>
+(cherry picked from commit 94ca49563acb36a19fb578499b04c84d5b0a5181)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ kernel/signal.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/signal.c b/kernel/signal.c
+index ac24e4b169eff44a0a94b1b93ea6b205af104cb1..552f7df677c02b80b690f44c255211f0f2d7c4a4 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -1008,7 +1008,8 @@ static void complete_signal(int sig, struct task_struct *p, enum pid_type type)
+ 		 */
+ 		t = signal->curr_target;
+ 		while (!wants_signal(sig, t)) {
+-			t = next_thread(t);
++			t = list_next_entry_circular(t, &signal->thread_head,
++							thread_node);
+ 			if (t == signal->curr_target)
+ 				/*
+ 				 * No thread needs to be woken.
