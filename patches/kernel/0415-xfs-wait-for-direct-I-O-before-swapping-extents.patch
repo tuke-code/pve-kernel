@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Daejun Park <daejun7.park@samsung.com>
+Date: Tue, 10 Nov 2026 09:38:17 +0900
+Subject: [PATCH] xfs: wait for direct I/O before swapping extents
+
+An AIO direct write drops the iolock before its bios complete.
+XFS_IOC_SWAPEXT does not wait for it. The write can land in blocks that
+the swap moved to the temporary file. Once xfs_fsr frees them, the
+write corrupts whatever reuses them.
+
+Wait for direct I/O first, as exchange-range does.
+
+Fixes: 1da177e4c3f4 ("Linux-2.6.12-rc2")
+Cc: stable@vger.kernel.org
+Signed-off-by: Daejun Park <daejun7.park@samsung.com>
+Reviewed-by: Christoph Hellwig <hch@lst.de>
+Signed-off-by: Carlos Maiolino <cem@kernel.org>
+(cherry picked from commit 844bc1167f1b2d19d9495a556599af24dc4468bd)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/xfs/xfs_bmap_util.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/fs/xfs/xfs_bmap_util.c b/fs/xfs/xfs_bmap_util.c
+index b121a4922581f18ca8b184134cdcbed060b589b7..c44dbdaa1017a5e7a51cd5c4601a86e32e7200d8 100644
+--- a/fs/xfs/xfs_bmap_util.c
++++ b/fs/xfs/xfs_bmap_util.c
+@@ -1227,6 +1227,7 @@ xfs_swap_extent_flush(
+ {
+ 	int	error;
+ 
++	inode_dio_wait(VFS_I(ip));
+ 	error = filemap_write_and_wait(VFS_I(ip)->i_mapping);
+ 	if (error)
+ 		return error;

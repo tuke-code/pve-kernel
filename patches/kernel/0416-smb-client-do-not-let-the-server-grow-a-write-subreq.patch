@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ozgun kultekin <ozgunkultekin@gmail.com>
+Date: Tue, 17 Nov 2026 16:21:59 -0800
+Subject: [PATCH] smb: client: do not let the server grow a write subrequest
+
+smb2_writev_callback() takes the byte count from the SMB2 WRITE
+response, masks it with 0xFFFF if it is larger than the request (for
+old OS/2 servers), and then copies it into wdata->subreq.len.  A server
+can return a count that is still larger than the request after the
+mask, for example 0x8002 for a 5-byte write or 0xFFFF for a 4 KiB
+write, and the subrequest then covers data that was never sent.
+
+netfs uses the subrequest length to decide how far the write collector
+may advance.  With a grown subrequest the collector moves collected_to
+past the data that was issued: netfs_writeback_unlock_folios() walks
+folio_queue slots that were never filled, and
+rolling_buffer_delete_spent() frees folio_queue segments that later
+in-flight subrequests still use.  This is a use-after-free that a
+malicious or broken server triggers from an ordinary write:
+
+  BUG: KASAN: slab-use-after-free in netfs_limit_iter+0xed4/0x1040
+  Read of size 1 at addr ff11000010561511 by task kworker/u8:4/63
+  Workqueue: events_unbound netfs_write_collection_worker
+   netfs_limit_iter+0xed4/0x1040
+   netfs_retry_writes+0x1410/0x1e90
+   netfs_write_collection+0x2647/0x3880
+   netfs_write_collection_worker+0x1cd/0x3e0
+  Allocated by task 141:
+   netfs_folioq_alloc+0x39a/0x470
+   rolling_buffer_init+0x29/0xc0
+   netfs_create_write_req+0x12f/0x840
+  Freed by task 42:
+   rolling_buffer_delete_spent+0xb1/0x220
+   netfs_write_collection+0x1f62/0x3880
+
+Never change the subrequest length from the response.  If the count is
+still larger than the request after the mask, fail the write with -EIO
+and record it with a new write_overlarge trace point, like the read
+path does with read_overlarge.  A short count still returns -ENOSPC as
+before.
+
+The folio_queue form of the use-after-free exists since
+commit cd0277ed0c18 ("netfs: Use new folio_queue data type and
+iterator instead of xarray iter").
+
+Fixes: 3ee1a1fc3981 ("cifs: Cut over to using netfslib")
+Cc: stable@vger.kernel.org
+Signed-off-by: ozgun kultekin <ozgunkultekin@gmail.com>
+Reviewed-by: Namjae Jeon <linkinjeon@kernel.org>
+Signed-off-by: Paulo Alcantara <pc@manguebit.org>
+(cherry picked from commit f834c81f108f8bdb0e3aa8375a536fb6dda56c70)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/smb/client/smb2pdu.c | 17 +++++++++++++----
+ fs/smb/client/trace.h   |  1 +
+ 2 files changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/fs/smb/client/smb2pdu.c b/fs/smb/client/smb2pdu.c
+index 701e404d5f6ba78cb566677d31758c0f7c6addfb..e4a024fdb06b863cbfef1cfaedcbe8f283988be6 100644
+--- a/fs/smb/client/smb2pdu.c
++++ b/fs/smb/client/smb2pdu.c
+@@ -5074,14 +5074,23 @@ smb2_writev_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
+ 		if (written > wdata->subreq.len)
+ 			written &= 0xFFFF;
+ 
++		/*
++		 * The server must not report more bytes than were sent.  netfs
++		 * uses the subrequest length to work out which folios this
++		 * write has finished with, so it must not be changed here.
++		 */
++		if (written > wdata->subreq.len) {
++			result = smb_EIO2(smb_eio_trace_write_overlarge,
++					  written, wdata->subreq.len);
++			break;
++		}
++
+ 		cifs_stats_bytes_written(tcon, written);
+ 
+-		if (written < wdata->subreq.len) {
++		if (written < wdata->subreq.len)
+ 			result = -ENOSPC;
+-		} else if (written > 0) {
+-			wdata->subreq.len = written;
++		else if (written > 0)
+ 			__set_bit(NETFS_SREQ_MADE_PROGRESS, &wdata->subreq.flags);
+-		}
+ 		break;
+ 	case MID_REQUEST_SUBMITTED:
+ 		trace_netfs_sreq(&wdata->subreq, netfs_sreq_trace_io_req_submitted);
+diff --git a/fs/smb/client/trace.h b/fs/smb/client/trace.h
+index 523de62acfa541d8036c197531b61d020a333e99..aab1f89023088d94b223f1d878ef7bfecdaf9612 100644
+--- a/fs/smb/client/trace.h
++++ b/fs/smb/client/trace.h
+@@ -153,6 +153,7 @@
+ 	EM(smb_eio_trace_user_iter,			"user_iter") \
+ 	EM(smb_eio_trace_write_bad_buf_type,		"write_bad_buf_type") \
+ 	EM(smb_eio_trace_write_mid_state_unknown,	"write_mid_state_unknown") \
++	EM(smb_eio_trace_write_overlarge,		"write_overlarge") \
+ 	EM(smb_eio_trace_write_rsp_malformed,		"write_rsp_malformed") \
+ 	E_(smb_eio_trace_write_too_far,			"write_too_far")
+ 

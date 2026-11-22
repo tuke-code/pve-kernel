@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Miklos Szeredi <mszeredi@redhat.com>
+Date: Mon, 2 Nov 2026 15:11:04 +0100
+Subject: [PATCH] fuse: fix possible UAF in fuse_direntplus_link()
+
+In fuse_direntplus_link() a use-after-free occurs on struct fuse_inode when
+linking a newly allocated in-lookup dentry during FUSE_READDIRPLUS
+processing fails inside d_splice_alias().
+
+When d_in_lookup(dentry) is true, fuse_iget() returns an inode with an
+incremented reference count and fi->nlookup, which is then passed to
+d_splice_alias(). Inside d_splice_alias_ops(), if the directory inode has
+an existing alias and splicing fails with -ELOOP in d_ancestor() or -ESTALE
+in __d_unalias(), the function drops the alias reference via dput(new) and
+unconditionally consumes the caller's inode reference via iput(inode)
+before returning the error pointer.
+
+If the existing alias is concurrently unhashed and dropped, iput(inode)
+drops the final inode reference and evicts the inode immediately via
+fuse_evict_inode(), sending a FUSE_FORGET request for fi->nlookup and
+freeing struct fuse_inode via RCU. Because fuse_direntplus_link()
+subsequently checks !IS_ERR(inode) outside an RCU read-side critical
+section, it dereferences the freed inode to acquire fi->lock and decrement
+fi->nlookup, and its caller parse_dirplusfile() then invokes
+fuse_force_forget() on the error return, issuing a duplicate FUSE_FORGET
+request to the server.
+
+Fixes: b8bd342d50cb ("fuse: nlookup missing decrement in fuse_direntplus_link")
+Cc: stable@vger.kernel.org #v6.6+
+Reported-by: Sashiko <sashiko-bot@kernel.org>
+Closes: https://sashiko.dev/#/bug/linux-0a00a32c-3732-46fe-9cdb-3c67a11903cc
+Signed-off-by: Miklos Szeredi <mszeredi@redhat.com>
+(cherry picked from commit 9191c2c1a76a759ac97be72481fdd4f9e920c902)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/fuse/readdir.c | 20 ++++++++++++--------
+ 1 file changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/fs/fuse/readdir.c b/fs/fuse/readdir.c
+index 1b04b17eac731bbe52c687213be16e09337c11ee..05a856d6005332a30646f2623d2d35e9a082eab0 100644
+--- a/fs/fuse/readdir.c
++++ b/fs/fuse/readdir.c
+@@ -241,9 +241,13 @@ static int fuse_direntplus_link(struct file *file,
+ 		inode = fuse_iget(dir->i_sb, o->nodeid, o->generation,
+ 				  &o->attr, ATTR_TIMEOUT(o),
+ 				  attr_version, evict_ctr);
+-		if (!inode)
+-			inode = ERR_PTR(-ENOMEM);
++		if (!inode) {
++			d_lookup_done(dentry);
++			dput(dentry);
++			return -ENOMEM;
++		}
+ 
++		ihold(inode); /* d_splice_alias() eats a reference */
+ 		alias = d_splice_alias(inode, dentry);
+ 		d_lookup_done(dentry);
+ 		if (alias) {
+@@ -251,15 +255,15 @@ static int fuse_direntplus_link(struct file *file,
+ 			dentry = alias;
+ 		}
+ 		if (IS_ERR(dentry)) {
+-			if (!IS_ERR(inode)) {
+-				struct fuse_inode *fi = get_fuse_inode(inode);
++			struct fuse_inode *fi = get_fuse_inode(inode);
+ 
+-				spin_lock(&fi->lock);
+-				fi->nlookup--;
+-				spin_unlock(&fi->lock);
+-			}
++			spin_lock(&fi->lock);
++			fi->nlookup--;
++			spin_unlock(&fi->lock);
++			iput(inode);
+ 			return PTR_ERR(dentry);
+ 		}
++		iput(inode);
+ 	}
+ 	if (fc->readdirplus_auto)
+ 		set_bit(FUSE_I_INIT_RDPLUS, &get_fuse_inode(inode)->state);
