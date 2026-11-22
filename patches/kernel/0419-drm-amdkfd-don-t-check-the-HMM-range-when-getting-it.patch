@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jesse Zhang <Jesse.Zhang@amd.com>
+Date: Tue, 3 Nov 2026 20:12:40 +0800
+Subject: [PATCH] drm/amdkfd: don't check the HMM range when getting its pages
+ failed
+
+When allocating the PFN array fails, amdgpu_hmm_range_get_pages()
+returns -ENOMEM before setting the notifier of the range, but
+svm_range_validate_and_map() still checks the range, as it is not NULL,
+before looking at the error. On navi48, setting SVM attributes with
+failslab:
+
+  KASAN: null-ptr-deref in range [0x0000000000000050-0x0000000000000057]
+  RIP: 0010:amdgpu_hmm_range_valid+0x66/0xa0 [amdgpu]
+   svm_range_validate_and_map+0xaef/0x4e40 [amdgpu]
+   svm_range_set_attr+0x193e/0x4610 [amdgpu]
+   kfd_ioctl_svm+0x137/0x320 [amdgpu]
+
+Check the error first; it is only 0 when the pages were taken.
+
+Fixes: c0de552910bb ("drm/amdkfd: clean up the code to free hmm_range")
+Reviewed-by: Felix Kuehling <felix.kuehling@amd.com>
+Signed-off-by: Jesse Zhang <Jesse.Zhang@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+(cherry picked from commit c7036242655cb2c6d14a0d04138536e1ddb5e42c)
+Cc: stable@vger.kernel.org
+(cherry picked from commit 264b67a79010cd3ffa85603d85e594867a45a01d)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/gpu/drm/amd/amdkfd/kfd_svm.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/amd/amdkfd/kfd_svm.c b/drivers/gpu/drm/amd/amdkfd/kfd_svm.c
+index 3ed04a43f1c04db45f8bf9cb513931d01b5db53e..7eca061c636b3d1460e6ea3491561b34def908b9 100644
+--- a/drivers/gpu/drm/amd/amdkfd/kfd_svm.c
++++ b/drivers/gpu/drm/amd/amdkfd/kfd_svm.c
+@@ -1811,11 +1811,12 @@ static int svm_range_validate_and_map(struct mm_struct *mm,
+ 
+ 		svm_range_lock(prange);
+ 
+-		/* Free backing memory of hmm_range if it was initialized
+-		 * Override return value to TRY AGAIN only if prior returns
+-		 * were successful
++		/*
++		 * Retry if the pages were invalidated after they were taken.
++		 * Only check that when taking them succeeded: a range can exist
++		 * without a notifier, e.g. when allocating its PFN array failed.
+ 		 */
+-		if (range && !amdgpu_hmm_range_valid(range) && !r) {
++		if (!r && !amdgpu_hmm_range_valid(range)) {
+ 			pr_debug("hmm update the range, need validate again\n");
+ 			r = -EAGAIN;
+ 		}
