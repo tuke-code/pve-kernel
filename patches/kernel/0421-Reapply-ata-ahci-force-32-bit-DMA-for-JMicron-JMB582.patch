@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Thomas Lamprecht <t.lamprecht@proxmox.com>
+Date: Sun, 22 Nov 2026 18:03:26 +0100
+Subject: [PATCH] Reapply "ata: ahci: force 32-bit DMA for JMicron
+ JMB582/JMB585"
+
+This reverts commit 803e1c8ebae9, the backport of upstream commit
+6b28e0e7a073 ("Revert "ata: ahci: force 32-bit DMA for JMicron
+JMB582/JMB585""), which came with the Proxmox-7.0-20261116 base in
+7.0.14-30.
+
+Since then, the host's ahci driver uses 64-bit DMA for these
+controllers and writes the upper halves of the command list and FIS
+receive addresses into PxCLBU and PxFBU. A JMB585 passed through to a
+VM stopped working with 7.0.14-30: the guest binds its ahci driver, but
+every port fails with "softreset failed (1st FIS failed)" or "SATA link
+down", and the host logs no IOMMU fault. The quirk removal is the only
+functional AHCI change between 7.0.14-29 and 7.0.14-30. The likely
+mechanism is that the upper halves survive the vfio-pci reset, and a
+guest kernel that forces 32-bit DMA for the JMB585 but does not clear
+the upper halves yet, which upstream 82e47533221d added (for example
+Linux 6.12.83 to 6.12.111), only writes the lower halves. The
+controller then fetches commands and posts FISes at wrong guest
+addresses.
+
+With the quirk, the host uses 32-bit DMA and writes zero to the upper
+halves, as 82e47533221d is in our base, like all 7.0 kernels up to
+7.0.14-29 did. Upstream dropped the quirk because the 64-bit DMA
+corruption it worked around comes from enhanced atomics on AMD NBIO
+7.7 and 7.11 root ports, which 4fde44822512 ("x86/PCI: Disable enhanced
+atomics on AMD NBIO 7.7 and 7.11"), also in our base, now disables.
+Keeping the quirk thus only costs 64-bit DMA for these controllers on
+the host.
+
+Link: https://bugzilla.proxmox.com/show_bug.cgi?id=8367
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/ata/ahci.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/drivers/ata/ahci.c b/drivers/ata/ahci.c
+index bffe50a109b88f72c420218648b6afb184b49bcc..9b8c0935001cb35e9b6603dc6d4e4b683de1a905 100644
+--- a/drivers/ata/ahci.c
++++ b/drivers/ata/ahci.c
+@@ -68,6 +68,7 @@ enum board_ids {
+ 	/* board IDs for specific chipsets in alphabetical order */
+ 	board_ahci_al,
+ 	board_ahci_avn,
++	board_ahci_jmb585,
+ 	board_ahci_mcp65,
+ 	board_ahci_mcp77,
+ 	board_ahci_mcp89,
+@@ -212,6 +213,15 @@ static const struct ata_port_info ahci_port_info[] = {
+ 		.udma_mask	= ATA_UDMA6,
+ 		.port_ops	= &ahci_avn_ops,
+ 	},
++	/* JMicron JMB582/585: 64-bit DMA is broken, force 32-bit */
++	[board_ahci_jmb585] = {
++		AHCI_HFLAGS	(AHCI_HFLAG_IGN_IRQ_IF_ERR |
++				 AHCI_HFLAG_32BIT_ONLY),
++		.flags		= AHCI_FLAG_COMMON,
++		.pio_mask	= ATA_PIO4,
++		.udma_mask	= ATA_UDMA6,
++		.port_ops	= &ahci_ops,
++	},
+ 	[board_ahci_mcp65] = {
+ 		AHCI_HFLAGS	(AHCI_HFLAG_NO_FPDMA_AA | AHCI_HFLAG_NO_PMP |
+ 				 AHCI_HFLAG_YES_NCQ),
+@@ -944,6 +954,14 @@ static const struct pci_device_id ahci_pci_tbl[] = {
+ 		/* Elkhart Lake AHCI */
+ 		PCI_VDEVICE(INTEL, 0x4b63),
+ 		.driver_data = board_ahci_pcs_quirk,
++	}, {
++		/* JMicron JMB582/585: force 32-bit DMA (broken 64-bit implementation) */
++		PCI_VDEVICE(JMICRON, 0x0582),
++		.driver_data = board_ahci_jmb585,
++
++	}, {
++		PCI_VDEVICE(JMICRON, 0x0585),
++		.driver_data = board_ahci_jmb585,
+ 	}, {
+ 		/* JMicron 360/1/3/5/6, match class to avoid IDE function */
+ 		PCI_DEVICE(PCI_VENDOR_ID_JMICRON, PCI_ANY_ID),
