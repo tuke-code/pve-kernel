@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Daniel Wade <danjwade95@gmail.com>
+Date: Sun, 15 Nov 2026 09:05:29 +1030
+Subject: [PATCH 431/455] net: af_key: fix use-after-free in dump_sp() on
+ policy migrate
+
+pfkey_xfrm_policy2msg_size() derives an exported policy's message length
+from xfrm_vec[].encap_family. dump_sp() derives it twice: once through
+pfkey_xfrm_policy2msg_prep(), which allocates the skb, and again in
+pfkey_xfrm_policy2msg(), which fills it in.
+
+dump_sp() holds net->xfrm.xfrm_policy_lock rather than pol->lock, so
+xfrm_policy_migrate() can rewrite encap_family between the two
+derivations. The second length is then up to 24 bytes per template
+larger than the first, and pfkey_xfrm_policy2msg() opens with
+memset(hdr, 0, size), clearing the difference into the skb's shared
+info. Four BEET templates put 80 bytes there, which reaches dataref:
+alloc_skb() had set it to 1, the memset makes it 0, and the skb_clone()
+in pfkey_broadcast_one() leaves two skbs sharing one head with a dataref
+of 1. Freeing the original releases a head the queued clone still points
+at, so recvmsg() copies freed memory to user space and consume_skb()
+frees it a second time. The CAP_NET_ADMIN that pfkey_create() and the
+xfrm netlink receive path check is namespace-relative, so an
+unprivileged user can reach this. SLUB's double-free check fires within
+a second of starting the reproducer; the oops kills a task, or panics
+the machine when the corruption lands in softirq context.
+
+Racing SADB_X_SPDDUMP against XFRM_MSG_MIGRATE as an ordinary user gave
+4585 use-after-free reports and 765 double-frees in 300s on mainline
+with KASAN and 8 CPUs. The reads reach user space (addresses trimmed):
+
+  BUG: KASAN: slab-use-after-free in _copy_to_iter+0x1d8/0x1430
+  Read of size 240 at addr ffff88810f98d140 by task pfkey_dataref_o/433
+  CPU: 3 UID: 65534 PID: 433 Comm: pfkey_dataref_o Not tainted 7.4.0-rc2
+  Call Trace:
+   <TASK>
+   dump_stack_lvl+0x66/0xa0
+   print_report+0xd0/0x600
+   kasan_report+0xc6/0x100
+   kasan_check_range+0x105/0x1b0
+   _copy_to_iter+0x1d8/0x1430
+   __skb_datagram_iter+0xf8/0x820
+   skb_copy_datagram_iter+0x6c/0x1a0
+   pfkey_recvmsg+0x1ff/0x500
+   sock_recvmsg+0x15e/0x1a0
+   __sys_recvfrom+0x182/0x260
+   do_syscall_64+0x10b/0x5f0
+   entry_SYSCALL_64_after_hwframe+0x77/0x7f
+  Allocated by task 433:
+   kmalloc_reserve+0x108/0x2b0
+   __alloc_skb+0x123/0x5b0
+   dump_sp+0xdf/0x490
+   xfrm_policy_walk+0x1d9/0x6c0
+   pfkey_do_dump+0x61/0x420
+   pfkey_recvmsg+0x358/0x500
+
+Take xp->lock for reading across both calls, so both derivations see the
+same encap_family. xfrm_policy_walk() already calls dump_sp() under
+spin_lock_bh(), so the plain reader suffices, as in xfrm_policy_timer().
+The other callers of this pair are already serialized against migrate by
+net->xfrm.xfrm_cfg_mutex.
+
+Fixes: 80c9abaabf42 ("[XFRM]: Extension for dynamic update of endpoint address(es)")
+Cc: stable@vger.kernel.org
+Signed-off-by: Daniel Wade <danjwade95@gmail.com>
+Link: https://patch.msgid.link/20261114223529.1791-1-danjwade95@gmail.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+(cherry picked from commit af6737b9066832a2017c281159950ba92385ce00)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ net/key/af_key.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/net/key/af_key.c b/net/key/af_key.c
+index 6609e89e8a7aacfa1280a913a50c213a6352b8dd..7b52b57ed485e1bc72ee32aa9c42187f52eff2a6 100644
+--- a/net/key/af_key.c
++++ b/net/key/af_key.c
+@@ -2712,11 +2712,18 @@ static int dump_sp(struct xfrm_policy *xp, int dir, int count, void *ptr)
+ 	if (!pfkey_can_dump(&pfk->sk))
+ 		return -ENOBUFS;
+ 
++	/* Both halves derive the size from xfrm_vec[].encap_family, so
++	 * hold xp->lock against a concurrent xfrm_policy_migrate().
++	 */
++	read_lock(&xp->lock);
+ 	out_skb = pfkey_xfrm_policy2msg_prep(xp);
+-	if (IS_ERR(out_skb))
++	if (IS_ERR(out_skb)) {
++		read_unlock(&xp->lock);
+ 		return PTR_ERR(out_skb);
++	}
+ 
+ 	err = pfkey_xfrm_policy2msg(out_skb, xp, dir);
++	read_unlock(&xp->lock);
+ 	if (err < 0) {
+ 		kfree_skb(out_skb);
+ 		return err;

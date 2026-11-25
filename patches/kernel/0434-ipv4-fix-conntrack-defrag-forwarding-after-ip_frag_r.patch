@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jiayuan Chen <jiayuan.chen@linux.dev>
+Date: Fri, 20 Nov 2026 17:46:59 +0800
+Subject: [PATCH 434/455] ipv4: fix conntrack defrag forwarding after
+ ip_frag_reinit()
+
+q.max_size and max_df_size are used by ip_frag_reasm() to set
+IPCB(skb)->frag_max_size and the DF bit of the reassembled packet.
+
+ip_frag_reinit() reuses the queue for a new datagram but does not
+reset them, so the new datagram inherits them from the old one.
+
+On a router with conntrack defrag, if the largest fragment of the old
+datagram had DF set and was larger than the egress MTU, a new datagram
+without DF gets DF set after reassembly and is rejected with
+ICMP_FRAG_NEEDED, even though all its fragments fit.
+
+Reset both fields.
+
+Fixes: 5f2d04f1f9b5 ("ipv4: fix path MTU discovery with connection tracking")
+Fixes: d6b915e29f4a ("ip_fragment: don't forward defragmented DF packet")
+Reviewed-by: Eric Dumazet <edumazet@kernel.org>
+Signed-off-by: Jiayuan Chen <jiayuan.chen@linux.dev>
+Link: https://patch.msgid.link/20261120094700.46500-1-jiayuan.chen@linux.dev
+Signed-off-by: Willem de Bruijn <willemb@google.com>
+(cherry picked from commit 3ab5aae0eb60079d17378af5aab0db84ba946e0e)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ net/ipv4/ip_fragment.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/net/ipv4/ip_fragment.c b/net/ipv4/ip_fragment.c
+index ef7fd61284a3fa86ba5464abd8c277e3753da6ac..0688be8142c4b3eaea6c600e27fc2f306804dcab 100644
+--- a/net/ipv4/ip_fragment.c
++++ b/net/ipv4/ip_fragment.c
+@@ -250,6 +250,8 @@ static int ip_frag_reinit(struct ipq *qp)
+ 	qp->q.flags = 0;
+ 	qp->q.len = 0;
+ 	qp->q.meat = 0;
++	qp->q.max_size = 0;
++	qp->max_df_size = 0;
+ 	qp->iif = 0;
+ 	qp->ecn = 0;
+ 

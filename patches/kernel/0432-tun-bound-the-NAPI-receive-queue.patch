@@ -1,0 +1,173 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Antonio Quartulli <antonio@mandelbit.com>
+Date: Thu, 19 Nov 2026 16:30:55 +0100
+Subject: [PATCH 432/455] tun: bound the NAPI receive queue
+
+With IFF_NAPI, tun_get_user() queues every written packet for NAPI on
+an unbounded list. When the poll runs asynchronously (threaded NAPI or
+ksoftirqd) and is slower than the writer, the queue grows until the
+system runs out of memory. An unprivileged user can do this from its own
+user and network namespaces, and the queued skbs are not charged to its
+memcg: in a test VM, a uid 1000 process limited to 128 MB caused a
+global OOM in ~6 seconds. The socket send buffer does not help: tun sets
+it to INT_MAX by default, the build_skb() path is only used while it is
+INT_MAX, and the XDP batch path never checks it.
+
+Drop packets once more than netdev_max_backlog of them are queued, like
+enqueue_to_backlog() does, and count them as rx_dropped; the write still
+reports success, as for a full backlog. The check sits where packets are
+queued for NAPI, in tun_get_user() and in tun_xdp_one() for the batches
+vhost-net passes, so packets consumed by XDP or delivered through
+IFF_NAPI_FRAGS are not affected. A dropped zerocopy skb completes its
+buffer when freed. The check is lockless, so concurrent writers can each
+still add one packet.
+
+The NAPI poll moved the whole queue out, processed up to its budget and
+put the rest back: while it ran, the queue looked empty to writers, so
+with the poll on another CPU the backlog could still grow without limit.
+Take at most budget packets instead: the rest stays on the queue writers
+check.
+
+Dropping also schedules NAPI. vhost-net sends with MSG_MORE while it has
+more packets, and tun_get_user() schedules NAPI only for a packet
+without it or once more than NAPI_POLL_WEIGHT are queued. With a
+netdev_max_backlog below that, the queue fills first and the packet
+without MSG_MORE is dropped too: nothing would schedule NAPI, and the
+queued packets, with zerocopy also their buffers, would wait forever.
+
+Reproducer, as an unprivileged user in a new user and network
+namespace, without kernel modifications or fault injection:
+  ip tuntap add t0 mode tun; ip addr add 10.11.0.1/24 dev t0
+  ip link add d0 type dummy; ip addr add 10.20.0.1/24 dev d0
+  ip link set t0 up; ip link set d0 up; sysctl net.ipv4.ip_forward=1
+  install ~500 iptables FORWARD rules, to slow down the poll, and a
+  MASQUERADE rule on d0
+  open t0 with IFF_TUN | IFF_NO_PI | IFF_NAPI
+  echo 1 > /sys/class/net/t0/threaded
+  write() 1400-byte IPv4 packets for 10.20.0.2 in a loop
+
+Found by code inspection while analysing the performance of the tun
+write path. Tested in an x86-64 VM on net, with 1 and 2 vCPUs: the
+reproducer causes a global OOM without the patch, while with it memory
+use stays flat and the forwarding rate is unchanged; the tun kselftest
+passes; a local vhost-net test of the batch, copy and zerocopy paths
+with netdev_max_backlog set to 8 passes, and fails without the patch;
+an XDP program on the device sees every packet while the excess is
+dropped.
+
+Still open: neither the packet size nor the queued memory is bounded,
+and the skbs are not charged to the writer's memcg. A single write can
+create an skb of several hundred KB, so even one queue can hold a lot,
+and IFF_MULTI_QUEUE (allowed in a user namespace) and more devices
+multiply it. This bounds the queue as enqueue_to_backlog() bounds the
+per-CPU backlog; charging the skbs to the writer is left to a follow-up.
+
+Fixes: 943170998b20 ("tun: enable NAPI for TUN/TAP driver")
+Signed-off-by: Antonio Quartulli <antonio@mandelbit.com>
+Reviewed-by: Willem de Bruijn <willemb@google.com>
+Link: https://patch.msgid.link/20261119153056.353156-1-antonio@mandelbit.com
+Signed-off-by: Willem de Bruijn <willemb@google.com>
+(cherry picked from commit cc7fe6e741730fef549e484379281736d32746f0)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/net/tun.c | 52 +++++++++++++++++++++++++++++++++++++++--------
+ 1 file changed, 44 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/tun.c b/drivers/net/tun.c
+index 04466a7ca35c5e38ee7f32c913b7e12314384910..e985907e5c6f579fd42ba0cd44c6ae1dcb88136b 100644
+--- a/drivers/net/tun.c
++++ b/drivers/net/tun.c
+@@ -58,6 +58,7 @@
+ #include <linux/nsproxy.h>
+ #include <linux/virtio_net.h>
+ #include <linux/rcupdate.h>
++#include <net/hotdata.h>
+ #include <net/net_namespace.h>
+ #include <net/netns/generic.h>
+ #include <net/rtnetlink.h>
+@@ -224,6 +225,16 @@ struct veth {
+ static void tun_flow_init(struct tun_struct *tun);
+ static void tun_flow_uninit(struct tun_struct *tun);
+ 
++/* In IFF_NAPI mode written packets wait in the tfile's sk_write_queue for the
++ * NAPI poll, which may run later in a kthread or ksoftirqd. Bound that queue
++ * like the per-CPU backlog.
++ */
++static bool tun_napi_queue_full(const struct sk_buff_head *queue)
++{
++	return skb_queue_len_lockless(queue) >
++	       READ_ONCE(net_hotdata.max_backlog);
++}
++
+ static int tun_napi_receive(struct napi_struct *napi, int budget)
+ {
+ 	struct tun_file *tfile = container_of(napi, struct tun_file, napi);
+@@ -234,21 +245,22 @@ static int tun_napi_receive(struct napi_struct *napi, int budget)
+ 
+ 	__skb_queue_head_init(&process_queue);
+ 
++	/* At most budget skbs: the rest stays on the queue writers check */
+ 	spin_lock(&queue->lock);
+-	skb_queue_splice_tail_init(queue, &process_queue);
++	if (skb_queue_len(queue) <= budget) {
++		skb_queue_splice_tail_init(queue, &process_queue);
++	} else {
++		while (skb_queue_len(&process_queue) < budget &&
++		       (skb = __skb_dequeue(queue)))
++			__skb_queue_tail(&process_queue, skb);
++	}
+ 	spin_unlock(&queue->lock);
+ 
+-	while (received < budget && (skb = __skb_dequeue(&process_queue))) {
++	while ((skb = __skb_dequeue(&process_queue))) {
+ 		napi_gro_receive(napi, skb);
+ 		++received;
+ 	}
+ 
+-	if (!skb_queue_empty(&process_queue)) {
+-		spin_lock(&queue->lock);
+-		skb_queue_splice(&process_queue, queue);
+-		spin_unlock(&queue->lock);
+-	}
+-
+ 	return received;
+ }
+ 
+@@ -1957,6 +1969,19 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
+ 		struct sk_buff_head *queue = &tfile->sk.sk_write_queue;
+ 		int queue_len;
+ 
++		/* Queue full: drop, and schedule NAPI, which a MSG_MORE sender
++		 * may not have done yet. Lockless: concurrent writers can each
++		 * still add one.
++		 */
++		if (unlikely(tun_napi_queue_full(queue))) {
++			local_bh_disable();
++			napi_schedule(&tfile->napi);
++			local_bh_enable();
++			rcu_read_unlock();
++			drop_reason = SKB_DROP_REASON_FULL_RING;
++			goto drop;
++		}
++
+ 		spin_lock_bh(&queue->lock);
+ 
+ 		if (unlikely(tfile->detached)) {
+@@ -2513,6 +2538,17 @@ static int tun_xdp_one(struct tun_struct *tun,
+ 
+ 	if (tfile->napi_enabled) {
+ 		queue = &tfile->sk.sk_write_queue;
++
++		/* Queue full: drop, and schedule NAPI so that it drains even if
++		 * nothing in this batch gets queued.
++		 */
++		if (unlikely(tun_napi_queue_full(queue))) {
++			napi_schedule(&tfile->napi);
++			kfree_skb_reason(skb, SKB_DROP_REASON_FULL_RING);
++			dev_core_stats_rx_dropped_inc(tun->dev);
++			return 0;
++		}
++
+ 		spin_lock(&queue->lock);
+ 
+ 		if (unlikely(tfile->detached)) {

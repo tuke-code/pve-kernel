@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Willem de Bruijn <willemb@google.com>
+Date: Thu, 19 Nov 2026 23:46:39 -0500
+Subject: [PATCH 435/455] net: gso: cow head on tcp fraglist fallback to
+ skb_segment
+
+When tcp4_gso_segment() or tcp6_gso_segment() cannot use
+skb_segment_list(), they fall back to tcp_gso_segment(), first resetting
+th->check to the pseudo-header sum. This writes to skb->head without
+unsharing it. If the skb is cloned, e.g., by a packet socket on a bridge
+port, the other holders see the rewritten checksum.
+
+Call skb_cow_head(), like skb_segment_list() and the UDP fallback
+already unshare the head with skb_unclone() and __skb_linearize().
+skb_header_cloned() is equivalent to skb_cloned() here, as GRO does not
+set nohdr on the head of fraglist skbs.
+
+Discovered by an AI code review agent. Reproduced on an unmodified
+kernel with bridged veth devices and an AF_PACKET socket, and verified
+in virtme-ng.
+
+Fixes: 17bd3bd82f9f ("net: gso: fix tcp fraglist segmentation after pull from frag_list")
+Cc: stable@vger.kernel.org
+Signed-off-by: Willem de Bruijn <willemb@google.com>
+Link: https://patch.msgid.link/20261120044733.222627-2-willemdebruijn.kernel@gmail.com
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+(cherry picked from commit 3f137feaad8e56597493fc7dd2bc70a6248f9a69)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ net/ipv4/tcp_offload.c   | 5 +++++
+ net/ipv6/tcpv6_offload.c | 5 +++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/net/ipv4/tcp_offload.c b/net/ipv4/tcp_offload.c
+index b84fcd07c7230fc3230fdbc3a79d68d1e79b058e..520778c5ca7f7581bcd2d26cafe76618a2b60a3a 100644
+--- a/net/ipv4/tcp_offload.c
++++ b/net/ipv4/tcp_offload.c
+@@ -106,11 +106,16 @@ static struct sk_buff *tcp4_gso_segment(struct sk_buff *skb,
+ 
+ 	if (skb_shinfo(skb)->gso_type & SKB_GSO_FRAGLIST) {
+ 		struct tcphdr *th = tcp_hdr(skb);
++		int err;
+ 
+ 		if ((skb_pagelen(skb) - th->doff * 4 == skb_shinfo(skb)->gso_size) &&
+ 		    !(skb_shinfo(skb)->gso_type & SKB_GSO_DODGY))
+ 			return __tcp4_gso_segment_list(skb, features);
+ 
++		err = skb_cow_head(skb, 0);
++		if (err < 0)
++			return ERR_PTR(err);
++
+ 		skb->ip_summed = CHECKSUM_NONE;
+ 	}
+ 
+diff --git a/net/ipv6/tcpv6_offload.c b/net/ipv6/tcpv6_offload.c
+index eec3778855eb8992c933907b2ef7dd4239110c7b..0914f95f100c79a993cf70a506410dc2423a6d48 100644
+--- a/net/ipv6/tcpv6_offload.c
++++ b/net/ipv6/tcpv6_offload.c
+@@ -178,11 +178,16 @@ static struct sk_buff *tcp6_gso_segment(struct sk_buff *skb,
+ 
+ 	if (skb_shinfo(skb)->gso_type & SKB_GSO_FRAGLIST) {
+ 		struct tcphdr *th = tcp_hdr(skb);
++		int err;
+ 
+ 		if ((skb_pagelen(skb) - th->doff * 4 == skb_shinfo(skb)->gso_size) &&
+ 		    !(skb_shinfo(skb)->gso_type & SKB_GSO_DODGY))
+ 			return __tcp6_gso_segment_list(skb, features);
+ 
++		err = skb_cow_head(skb, 0);
++		if (err < 0)
++			return ERR_PTR(err);
++
+ 		skb->ip_summed = CHECKSUM_NONE;
+ 	}
+ 

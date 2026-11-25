@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nguyen Ngoc Thang <ngocthang2710.1999@gmail.com>
+Date: Sun, 15 Nov 2026 20:26:11 +0700
+Subject: [PATCH 433/455] xfrm: iptfs: force a dst reference before queueing an
+ skb
+
+iptfs_output_collect() is the dst->output hook and runs under the
+caller's RCU read lock. It queues the skb and sends it later from the
+iptfs hrtimer. The skb may still carry a noref dst, e.g. one set by
+__ip_queue_xmit() via skb_dst_set_noref(). Once the RCU section ends,
+nothing keeps that dst alive.
+
+When the timer fires, xfrm_output_one() calls skb_dst_force() outside
+any RCU section:
+
+  WARNING: include/net/dst.h:326 at xfrm_output_resume+0x41d9/0x64e0
+  Call Trace:
+   xfrm_output_one net/xfrm/xfrm_output.c:549 [inline]
+   xfrm_output_resume+0x41d9/0x64e0 net/xfrm/xfrm_output.c:597
+   iptfs_output_queued net/xfrm/xfrm_iptfs.c:2325 [inline]
+   iptfs_delay_timer+0x3803/0x4310 net/xfrm/xfrm_iptfs.c:2362
+   __run_hrtimer kernel/time/hrtimer.c [inline]
+   __hrtimer_run_queues+0x3bc/0xa10 kernel/time/hrtimer.c
+   hrtimer_run_softirq+0x1e3/0x2e0 kernel/time/hrtimer.c:2153
+   handle_softirqs+0x265/0x8d0 kernel/softirq.c:669
+
+The warning also means the queued skb may point to a dst that has
+already been freed.
+
+Take a reference with skb_dst_force() while still under RCU, as other
+deferred xmit paths do, and drop the skb if its dst is already gone.
+
+Fixes: 0e4fbf013fa5 ("xfrm: iptfs: add user packet (tunnel ingress) handling")
+Reported-by: syzbot+622de7e1f18a30fc404a@syzkaller.appspotmail.com
+Closes: https://syzkaller.appspot.com/bug?extid=622de7e1f18a30fc404a
+Signed-off-by: Nguyen Ngoc Thang <ngocthang2710.1999@gmail.com>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+(cherry picked from commit b88c75488ecc768acadb14e980bbfa087b1dbf38)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ net/xfrm/xfrm_iptfs.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/net/xfrm/xfrm_iptfs.c b/net/xfrm/xfrm_iptfs.c
+index 71bdc8d61015dd7ecb6ff33b460ccb0405060f38..907f5fd53ed6432145ffb74d79549058611936c4 100644
+--- a/net/xfrm/xfrm_iptfs.c
++++ b/net/xfrm/xfrm_iptfs.c
+@@ -1915,6 +1915,13 @@ static int iptfs_output_collect(struct net *net, struct sock *sk, struct sk_buff
+ 			continue;
+ 		}
+ 
++		/* The queued skb outlives our RCU section, so pin its dst. */
++		if (!skb_dst_force(skb)) {
++			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
++			kfree_skb(skb);
++			continue;
++		}
++
+ 		/* Enqueue to send in tunnel */
+ 		ok = iptfs_enqueue(xtfs, skb);
+ 		if (!ok)
