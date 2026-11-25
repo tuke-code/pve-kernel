@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Josef Bacik <josef@toxicpanda.com>
+Date: Thu, 22 Oct 2026 12:29:08 -0700
+Subject: [PATCH 424/455] KVM: nVMX: Clear nested.smm.guest_mode when freeing
+ nested state
+
+If an SMI arrives while L2 is active, vmx_enter_smm() forces a VM-Exit
+to L1, and records in nested.smm.guest_mode that RSM has to re-enter L2
+and in nested.smm.vmxon that the vCPU was post-VMXON.  free_nested()
+clears the latter, but not the former.
+
+Userspace can get KVM to free the nested state while the vCPU is in SMM,
+with KVM_SET_NESTED_STATE, e.g. with no VMXON region to say that the
+vCPU isn't in VMX operation, or by flipping the SMM flag back and forth
+with KVM_SET_VCPU_EVENTS.  When the guest then executes RSM,
+vmx_leave_smm() tries to re-enter L2 even though there is no vmcs12 any
+more, and nested_vmx_check_restored_vmcs12() dereferences the NULL
+nested.cached_vmcs12.
+
+Clear nested.smm.guest_mode along with the state that it refers to.
+
+Fixes: 8fcc4b5923af ("kvm: nVMX: Introduce KVM_CAP_NESTED_STATE")
+Reported-by: Karthikeyan Bhargavan <karthik@cryspen.com>
+Cc: stable@vger.kernel.org
+Assisted-by: LLM
+Cc: Chris Mason <mason@kernel.org>
+Co-developed-by: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+Signed-off-by: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+Signed-off-by: Josef Bacik <josef@toxicpanda.com>
+Link: https://patch.msgid.link/20261022192908.554376-1-seanjc@google.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+(cherry picked from commit 809f39842c1706089e0de82b5c1d851d84eec4dc)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ arch/x86/kvm/vmx/nested.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/x86/kvm/vmx/nested.c b/arch/x86/kvm/vmx/nested.c
+index f7152870d22978896430c41631fa8af0d68cedbd..51d4e89d407936bc620d130894ac2b1e71d65fae 100644
+--- a/arch/x86/kvm/vmx/nested.c
++++ b/arch/x86/kvm/vmx/nested.c
+@@ -349,6 +349,7 @@ static void free_nested(struct kvm_vcpu *vcpu)
+ 
+ 	vmx->nested.vmxon = false;
+ 	vmx->nested.smm.vmxon = false;
++	vmx->nested.smm.guest_mode = false;
+ 	vmx->nested.vmxon_ptr = INVALID_GPA;
+ 	free_vpid(vmx->nested.vpid02);
+ 	vmx->nested.posted_intr_nv = -1;

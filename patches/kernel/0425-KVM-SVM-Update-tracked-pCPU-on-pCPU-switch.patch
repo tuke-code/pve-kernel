@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yosry Ahmed <yosry@kernel.org>
+Date: Tue, 13 Oct 2026 19:53:58 +0000
+Subject: [PATCH 425/455] KVM: SVM: Update tracked pCPU on pCPU switch
+
+When a pCPU switch is detected in pre_svm_run(), update the tracked pCPU
+and mark all fields dirty in both VMCBs (if nested is initialized), in
+addition to resetting the ASID generation in both VMCBs.
+
+Commit bf260dc9e7b8 ("KVM: SVM: Trigger new ASID allocation in both
+VMCBs on pCPU switch") reset the ASID generation in both VMCBs on a pCPU
+switch, but only updated the tracked pCPU for the active VMCB to avoid
+unnecessarily dirtying the inactive VMCB. Leaving the inactive VMCB's
+tracked pCPU set to an old pCPU still allows an ASID allocated on one
+pCPU to be used on another:
+
+- vCPU runs with both vmcb01 and vmcb02 on pCPU A (both track cpu=A).
+- With vmcb01 active, vCPU migrates to pCPU B. vmcb01.cpu is updated to
+B, asid_generation is reset to 0 in both VMCBs, and a new ASID is
+allocated on pCPU B (setting vmcb01.asid_generation = gen_B).
+vmcb02.cpu remains A.
+- vCPU switches to vmcb02 and migrates back to pCPU A before
+pre_svm_run(). Because vmcb02.cpu is still A, no pCPU switch is
+detected, leaving vmcb01 with cpu=B and asid_generation=gen_B.
+Because vmcb02.asid_generation is 0, a new ASID (asid_A) is allocated
+on pCPU A.
+- vCPU switches back to vmcb01 and migrates to pCPU B. Neither a pCPU
+change nor a generation mismatch is detected for vmcb01, so VMRUN on
+pCPU B uses asid_A (allocated on pCPU A), which may collide with
+another vCPU on pCPU B.
+
+Because the per-VMCB cpu tracking is shared between ASID management and
+per-pCPU hardware VMCB clean bits, also mark both VMCBs dirty when
+updating their tracked pCPU so that the inactive VMCB does not run with
+stale clean bits when later entered on the new pCPU.
+
+Fixes: bf260dc9e7b8 ("KVM: SVM: Trigger new ASID allocation in both VMCBs on pCPU switch")
+Cc: stable@vger.kernel.org
+Reported-by: Stefan Teodorescu <fane@google.com>
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+Link: https://patch.msgid.link/20261013195358.163375-1-yosry@kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+(cherry picked from commit d41766c450650ec11702923309dc59b6e0c8ab4e)
+[TL: adjusted context for sev_guest(vcpu->kvm)]
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ arch/x86/kvm/svm/svm.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index d3cf216b25e2b9fbf03f0c0bdf14686475f47ed8..0d90aa9e0edcf9419ef99a53f8a65ace5365f40d 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -3712,7 +3712,8 @@ static int pre_svm_run(struct kvm_vcpu *vcpu)
+ 
+ 	/*
+ 	 * If the previous VMRUN of the VMCB occurred on a different physical
+-	 * cpu, then mark the VMCB dirty as hardware's clean bits are per pCPU.
++	 * cpu, mark the VMCB dirty and reset the ASID generation, as hardware's
++	 * clean bits and ASIDs are per pCPU.
+ 	 *
+ 	 * Reset the ASID generation in both VMCBs. This will lead to assigning
+ 	 * a new ASID now, and then again when switching to the other VMCB.
+@@ -3726,11 +3727,16 @@ static int pre_svm_run(struct kvm_vcpu *vcpu)
+ 	 *   another vCPU/VM.
+ 	 */
+ 	if (unlikely(svm->current_vmcb->cpu != vcpu->cpu)) {
+-		vmcb_mark_all_dirty(svm->vmcb);
+-		svm->current_vmcb->cpu = vcpu->cpu;
++		vmcb_mark_all_dirty(svm->vmcb01.ptr);
++		svm->vmcb01.cpu = vcpu->cpu;
+ 		svm->vmcb01.asid_generation = 0;
+-		svm->nested.vmcb02.asid_generation = 0;
+-        }
++
++		if (svm->nested.initialized) {
++			svm->nested.vmcb02.cpu = vcpu->cpu;
++			svm->nested.vmcb02.asid_generation = 0;
++			vmcb_mark_all_dirty(svm->nested.vmcb02.ptr);
++		}
++	}
+ 
+ 	if (sev_guest(vcpu->kvm))
+ 		return pre_sev_run(svm, vcpu->cpu);

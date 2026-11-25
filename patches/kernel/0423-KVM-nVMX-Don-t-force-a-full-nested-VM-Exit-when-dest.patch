@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sean Christopherson <seanjc@google.com>
+Date: Fri, 30 Oct 2026 14:20:50 -0700
+Subject: [PATCH 423/455] KVM: nVMX: Don't force a full nested VM-Exit when
+ destroying a vCPU
+
+For all intents and purposes, revert commit b4b65b5642d6 ("KVM: x86: cleanup
+freeing of nested state") and go back to manually tearing down nested state
+when freeing a vCPU.
+
+When a vCPU is destroyed while L2 is active, KVM synthesizes a nested
+VM-Exit, which flushes the cached shadow VMCS12 back to guest memory:
+
+  vmx_vcpu_free()
+  |-> nested_vmx_free_vcpu()
+      |-> vmx_leave_nested()
+          |-> nested_vmx_vmexit(vcpu, -1, 0, 0)
+              |-> nested_flush_cached_shadow_vmcs12()
+                  |-> kvm_write_guest_cached()
+                      |-> __copy_to_user(ghc->hva, ...)
+
+Accessing user memory via a memslot during VM destruction is broken, as
+there are no guarantees that current->mm == kvm->mm when the VM is dying,
+because the last reference to the VM can be put from a different process
+than the original creating processes.
+
+And even if the original process does put the final reference, during
+process exit, do_exit() calls exit_mm() before closing file descriptors, so
+vCPU destruction runs with current->mm == NULL on a borrowed lazy TLB
+active_mm.  If the borrowed address space has a writable mapping at the
+to-be-written userspace address, KVM will corrupt an unrelated task's
+memory since uaccess APIs, including __copy_to_user(), don't sanity check
+current->mm (and *can't* perform KVM's current->mm == kvm->mm sanity check
+since that is firmly a KVM-only concept).
+
+Furthermore, the shadow VMCS flaw is only the tip of the iceberg, as the
+MSR load/store lists mean that emulating a nested VM-Exit can read or write
+an arbitrary set of MSRs, e.g. if MSR_KVM_SYSTEM_TIME_NEW is in L1's MSR
+load list:
+
+      kvm_arch_vcpu_destroy()
+        kvmclock_reset() - takes pv_time off kvm->gpc_list
+        vmx_vcpu_free()
+          nested_vmx_free_vcpu()
+            vmx_leave_nested()
+              nested_vmx_vmexit()
+                __nested_vmx_vmexit()
+                  load_vmcs12_host_state()
+                    nested_vmx_load_msr() - writes the MSRs that L1 listed
+                  kvm_cpu_has_injectable_intr() - reads Xen's vcpu_info
+        kvm_xen_destroy_vcpu() - deactivates the vcpu_info cache
+
+processing the MSR write puts the "pv_time" cache back on kvm->gpc_list,
+and the next list_del() writes into the freed vCPU.  And as effectively
+pointed out by syzbot[*], attempting to fix each case individually is a
+losing game of whack-a-mole.
+
+Deliberately leave "nested_run_pending" as-is, because even though doing so
+creates potentially inconsistent state, KVM should *never* consume said
+state while freeing a vCPU.  I.e. if leaving nested_run_pending set trips a
+sanity check or bug, then that just means there's more fixing to be done.
+
+Open code only the "free vCPU" path, i.e. keep emulating a nested VM-Exit
+when forcing a vCPU out of L2 via vmx_leave_nested(), as there are a number
+of updates buried in the nested VM-Exit flow that are needed if the vCPU is
+going to run in L1, e.g. clearing pending exceptions and MTF traps, setting
+the TSC offset+scale information back to L1, and so on and so forth.  Note,
+this means svm_leave_nested() is all but guaranteed to be buggy, but that's
+basically an open secret at this point and at least any bugs "only" break
+L1, i.e. don't corrupt host state as is the case for abusing nested VM-Exit
+when freeing a vCPU.
+
+Link: https://lore.kernel.org/all/6ac0145f.34119e79.2f92f3.0003.GAE@google.com [*]
+Fixes: b4b65b5642d6 ("KVM: x86: cleanup freeing of nested state")
+Cc: stable@vger.kernel.org
+Co-developed-by: Chris Mason <mason@kernel.org>
+Signed-off-by: Chris Mason <mason@kernel.org>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+Reported-by: Hyunwoo Kim <imv4bel@gmail.com>
+Closes: https://lore.kernel.org/all/am3Bs0DjZ5kay9NJ@v4bel
+Tested-by: syzbot@syzkaller.appspotmail.com
+Link: https://patch.msgid.link/20261030212112.2598640-3-seanjc@google.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+(cherry picked from commit 99872af7b904c82bdb7ff64b5124cba667275faa)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ arch/x86/kvm/vmx/nested.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kvm/vmx/nested.c b/arch/x86/kvm/vmx/nested.c
+index 25b57a6134512cbe24581f50b6222f27ced79568..f7152870d22978896430c41631fa8af0d68cedbd 100644
+--- a/arch/x86/kvm/vmx/nested.c
++++ b/arch/x86/kvm/vmx/nested.c
+@@ -385,8 +385,15 @@ static void free_nested(struct kvm_vcpu *vcpu)
+  */
+ void nested_vmx_free_vcpu(struct kvm_vcpu *vcpu)
+ {
++	struct vcpu_vmx *vmx = to_vmx(vcpu);
++
+ 	vcpu_load(vcpu);
+-	vmx_leave_nested(vcpu);
++	if (is_guest_mode(vcpu)) {
++		hrtimer_cancel(&vmx->nested.preemption_timer);
++		leave_guest_mode(vcpu);
++		vmx_switch_vmcs(vcpu, &vmx->vmcs01);
++	}
++	free_nested(vcpu);
+ 	vcpu_put(vcpu);
+ }
+ 
