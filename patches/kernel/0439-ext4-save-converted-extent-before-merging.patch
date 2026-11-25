@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Jean?= <Jeremy.Jean@oss.cyber.gouv.fr>
+Date: Wed, 30 Sep 2026 13:45:17 +0000
+Subject: [PATCH 439/455] ext4: save converted extent before merging
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+In ext4_split_convert_extents(), merging can release the leaf holding
+the extent pointed to by ex. The later extent status cache update can
+then dereference freed memory, causing a use-after-free. KASAN reports:
+
+  BUG: KASAN: use-after-free in ext4_split_convert_extents.constprop.0+0xb98/0xc80
+  Read of size 2 at addr ff11000002547034 by task fixture/65
+
+Save the converted extent before merging and use the copy for the cache
+update. This also avoids using the old extent slot after a merge with
+the left neighbour.
+
+Fixes: 716b9c23b862 ("ext4: refactor split and convert extents")
+Cc: stable@kernel.org
+Assisted-by: LLM
+Signed-off-by: Jérémy Jean <Jeremy.Jean@oss.cyber.gouv.fr>
+Reviewed-by: Ojaswin Mujoo <ojaswin@linux.ibm.com>
+Link: https://patch.msgid.link/20260930134516.397754-2-Jeremy.Jean@oss.cyber.gouv.fr
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+(cherry picked from commit 8d90b9ab0875a6a838125e4980c8c6ab4a021c0a)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/ext4/extents.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/fs/ext4/extents.c b/fs/ext4/extents.c
+index 050d6e79710973ce0a7db2b79ec068254b98056c..0f2715e2890402ea8293220323a167f67aadb9c6 100644
+--- a/fs/ext4/extents.c
++++ b/fs/ext4/extents.c
+@@ -3822,6 +3822,7 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
+ 	ext4_lblk_t eof_block;
+ 	ext4_lblk_t ee_block;
+ 	struct ext4_extent *ex;
++	struct ext4_extent converted_ex;
+ 	unsigned int ee_len;
+ 	int split_flag = 0, depth, err = 0;
+ 	bool did_zeroout = false;
+@@ -3879,6 +3880,9 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
+ 		else if (flags & EXT4_GET_BLOCKS_CONVERT_UNWRITTEN)
+ 			ext4_ext_mark_unwritten(ex);
+ 
++		/* Merging can move ex or release the leaf containing it. */
++		converted_ex = *ex;
++
+ 		if (!(flags & EXT4_GET_BLOCKS_SPLIT_NOMERGE))
+ 		       /*
+ 			* note: ext4_ext_correct_indexes() isn't needed here because
+@@ -3889,6 +3893,7 @@ static struct ext4_ext_path *ext4_split_convert_extents(handle_t *handle,
+ 		err = ext4_ext_dirty(handle, inode, path + depth);
+ 		if (err)
+ 			goto err;
++		ex = &converted_ex;
+ 	}
+ 
+ 	/* Lets update the extent status tree after conversion */

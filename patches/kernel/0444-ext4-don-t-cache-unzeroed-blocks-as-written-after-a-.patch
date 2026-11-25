@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Daejun Park <daejun7.park@samsung.com>
+Date: Thu, 8 Oct 2026 10:25:36 +0900
+Subject: [PATCH 444/455] ext4: don't cache unzeroed blocks as written after a
+ failed zeroout
+
+ext4_ext_convert_to_initialized() may zero out the blocks before and
+after the range being written and convert them to written together with
+it, instead of splitting them off the unwritten extent. If
+ext4_ext_zeroout() fails for one side, it falls back to splitting the
+extent, so the blocks on that side stay unwritten in the extent tree.
+But zero_ex1 or zero_ex2 keeps its length, and ext4_zeroout_es() still
+inserts those blocks into the extent status tree as written.
+
+Until that entry goes away, a read of those blocks returns whatever was
+on the disk before the extent was allocated. A write to them is mapped
+from the cache and goes in place without converting the extent, so its
+data would read back as zeroes once the entry is dropped. To reproduce
+on 4 KiB blocks with -o nodelalloc: fallocate 32 KiB, map the last seven
+blocks of that extent to dm-error, write the first block, restore the
+mapping and read the second block. It returns the old disk contents
+instead of zeroes.
+
+Clear the length of an extent that could not be zeroed out, so that
+ext4_zeroout_es() skips it, as the comment at the out label intends.
+
+Fixes: 308c57ccf431 ("ext4: if zeroout fails fall back to splitting the extent node")
+Cc: stable@vger.kernel.org
+Reviewed-by: Jan Kara <jack@suse.cz>
+Signed-off-by: Daejun Park <daejun7.park@samsung.com>
+Reviewed-by: Ojaswin Mujoo <ojaswin@linux.ibm.com>
+Link: https://patch.msgid.link/20261008-ext4-fc-zeroout-v2-1-55cab1e24fa3@samsung.com
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+(cherry picked from commit 79906e00636e7e7831489e9c6a53dad1ec7a3399)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/ext4/extents.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/fs/ext4/extents.c b/fs/ext4/extents.c
+index 0f2715e2890402ea8293220323a167f67aadb9c6..de8a67f0b986439a0eb2eb007699b368f1749a08 100644
+--- a/fs/ext4/extents.c
++++ b/fs/ext4/extents.c
+@@ -3747,8 +3747,10 @@ ext4_ext_convert_to_initialized(handle_t *handle, struct inode *inode,
+ 				ext4_ext_pblock(ex) + split_map.m_lblk +
+ 				split_map.m_len - ee_block);
+ 			err = ext4_ext_zeroout(inode, &zero_ex1);
+-			if (err)
++			if (err) {
++				zero_ex1.ee_len = 0;
+ 				goto fallback;
++			}
+ 			split_map.m_len = *allocated;
+ 		}
+ 		if (split_map.m_lblk - ee_block + split_map.m_len <
+@@ -3761,8 +3763,10 @@ ext4_ext_convert_to_initialized(handle_t *handle, struct inode *inode,
+ 				ext4_ext_store_pblock(&zero_ex2,
+ 						      ext4_ext_pblock(ex));
+ 				err = ext4_ext_zeroout(inode, &zero_ex2);
+-				if (err)
++				if (err) {
++					zero_ex2.ee_len = 0;
+ 					goto fallback;
++				}
+ 			}
+ 
+ 			split_map.m_len += split_map.m_lblk - ee_block;

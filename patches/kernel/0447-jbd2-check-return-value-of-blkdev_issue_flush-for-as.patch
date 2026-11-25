@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: guolingxing <guolingxing@tju.edu.cn>
+Date: Tue, 13 Oct 2026 01:40:28 +0000
+Subject: [PATCH 447/455] jbd2: check return value of blkdev_issue_flush() for
+ async commits
+
+When asynchronous commits are enabled, jbd2_commit_transaction()
+calls blkdev_issue_flush() on the journal device to make the commit
+record permanent.  However the return value is ignored so if the
+flush fails, the transaction is considered committed although the
+commit record may have never reached the disk.  Abort the journal
+when the flush fails, as we already do when waiting for the commit
+record fails.
+
+Fixes: f73bee49855f ("jbd2: Modify ASYNC_COMMIT code to not rely on queue draining on barrier")
+Cc: stable@vger.kernel.org
+Signed-off-by: guolingxing <guolingxing@tju.edu.cn>
+Reviewed-by: Jan Kara <jack@suse.cz>
+Link: https://patch.msgid.link/20261013014028.1152277-4-guolingxing@tju.edu.cn
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+(cherry picked from commit 9e3cb03d39332370474222437660efb2ede3be6b)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/jbd2/commit.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/fs/jbd2/commit.c b/fs/jbd2/commit.c
+index c0632bfa022b9e764bf8447a0b1ae21ec10df141..d3c4b249e7856b9bf853fd7a740914a5f2aca486 100644
+--- a/fs/jbd2/commit.c
++++ b/fs/jbd2/commit.c
+@@ -886,7 +886,10 @@ void jbd2_journal_commit_transaction(journal_t *journal)
+ 	stats.run.rs_blocks_logged++;
+ 	if (jbd2_has_feature_async_commit(journal) &&
+ 	    journal->j_flags & JBD2_BARRIER) {
+-		blkdev_issue_flush(journal->j_dev);
++		int flush_err = blkdev_issue_flush(journal->j_dev);
++
++		if (!err)
++			err = flush_err;
+ 	}
+ 
+ 	if (err)

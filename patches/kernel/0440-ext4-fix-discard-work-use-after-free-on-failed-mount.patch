@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fan Wu <fanwu01@zju.edu.cn>
+Date: Wed, 9 Sep 2026 11:37:03 +0000
+Subject: [PATCH 440/455] ext4: fix discard work use-after-free on failed mount
+
+ext4_put_super() shuts the journal down before it releases the mballoc
+structures, but the failure unwind of __ext4_fill_super() runs the two
+steps in the opposite order: failed_mount6 calls ext4_mb_release(),
+which flushes sbi->s_discard_work, and the journal is destroyed only
+later, just above failed_mount3a.
+
+With -o discard, that journal destroy re-arms the work after the flush:
+ext4_journal_destroy() calls ext4_force_commit(), and the commit
+callback, registered once mballoc is initialized, queues s_discard_work
+whenever the discard option is set, even with an empty freed-data list.
+A running transaction can be live at that point: replaying the orphan
+list is the easiest way to get one, and the quota paths on
+failed_mount8/failed_mount9 can leave one too. The final force commit
+is not necessarily a no-op.
+
+Nothing drains s_discard_work after that point: failed_mount3 flushes
+only s_sb_upd_work and the s_err_report timer, and ext4_fill_super()
+then frees sbi with a plain kfree() through ext4_free_sbi(). If the
+system_dfl_wq worker is delayed across the rest of the unwind,
+ext4_discard_work() then accesses the freed sbi, first through
+sbi->s_sb and then while taking sbi->s_md_lock.
+
+This is the pattern fixed for the s_err_report timer in commit
+0ce160c5bdb6 ("ext4: fix timer use-after-free on failed mount"):
+async state armed after the unwind's last drain point.
+
+Force the commit at failed_mount6, before ext4_mb_release(), so that
+the discard work its commit callback queues is normally already
+pending when the flush_work() in ext4_mb_release() runs.
+disable_work_sync() there then makes this airtight: it also drains an
+instance the flush missed, and no later commit, including the force
+commit inside the journal destroy further down the unwind, can
+requeue the work. The journal destroy stays at its existing position.
+
+This issue was found by an in-house static analysis tool.
+
+Fixes: 55cdd0af2bc5 ("ext4: get discard out of jbd2 commit kthread contex")
+Cc: stable@vger.kernel.org # v6.10+
+Reviewed-by: Jan Kara <jack@suse.cz>
+Assisted-by: Codex:gpt-5.6
+Co-developed-by: Song Li <songl@zju.edu.cn>
+Signed-off-by: Song Li <songl@zju.edu.cn>
+Signed-off-by: Fan Wu <fanwu01@zju.edu.cn>
+Link: https://patch.msgid.link/20260909113703.698544-1-fanwu01@zju.edu.cn
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+(cherry picked from commit 7d7c94601664d19cea230601f377e5fb8a2ec4fe)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/ext4/mballoc.c | 2 ++
+ fs/ext4/super.c   | 6 ++++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/fs/ext4/mballoc.c b/fs/ext4/mballoc.c
+index bb58eafb87bcd6d865f63135f4df03d586a15523..9e6827b0a0fd97cf7580eecbda79040bf8f5e4ff 100644
+--- a/fs/ext4/mballoc.c
++++ b/fs/ext4/mballoc.c
+@@ -3897,6 +3897,8 @@ void ext4_mb_release(struct super_block *sb)
+ 	 * wait the discard work to drain all of ext4_free_data
+ 	 */
+ 	flush_work(&sbi->s_discard_work);
++	/* Prevent the later journal teardown from requeueing discard work. */
++	disable_work_sync(&sbi->s_discard_work);
+ 	WARN_ON_ONCE(!list_empty(&sbi->s_discard_list));
+ 
+ 	group_info = rcu_access_pointer(sbi->s_group_info);
+diff --git a/fs/ext4/super.c b/fs/ext4/super.c
+index b3d0055d04a8001568087c0bf62bc176e968380e..65d11f28327523299bccede5ac302820ae4dabca 100644
+--- a/fs/ext4/super.c
++++ b/fs/ext4/super.c
+@@ -5751,6 +5751,12 @@ failed_mount8: __maybe_unused
+ failed_mount7:
+ 	ext4_unregister_li_request(sb);
+ failed_mount6:
++	/*
++	 * We can have a running transaction from orphan replay or quota
++	 * setup. Commit it so that discard work after commit runs before
++	 * we shutdown mballoc.
++	 */
++	ext4_force_commit(sb);
+ 	ext4_mb_release(sb);
+ 	ext4_flex_groups_free(sbi);
+ failed_mount5:

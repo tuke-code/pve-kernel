@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: guolingxing <guolingxing@tju.edu.cn>
+Date: Fri, 16 Oct 2026 11:03:11 +0000
+Subject: [PATCH 443/455] ext4: record writeback error when discarding pages on
+ failed delalloc
+
+When mpage_map_and_submit_extent() gives up on a failed block mapping,
+it sets give_up_on_write so that mpage_release_unused_pages() discards
+the remaining dirty folios. However, the error is not recorded in the
+mapping's writeback error state.
+
+If this happens during background writeback, a later fsync() may
+report success even though the dirty data was discarded and never
+written. Returning the error from ext4_writepages() is not sufficient
+to notify a later fsync(). In addition, ext4_do_writepages() may clear
+-ENOSPC when committing the journal and retrying, even after the
+affected dirty folios have been discarded.
+
+Call mapping_set_error() when deciding to give up on the write,
+before the dirty folios are invalidated, so that fsync() can report
+the writeback failure through the mapping's error state.
+
+The give_up_on_write flag also persists across writeback loop
+iterations. After a fatal -ENOSPC failure sets it, ext4_do_writepages()
+may commit the journal and retry without clearing the flag. If a
+subsequent iteration encounters a transient error and leaves dirty
+folios pending, mpage_release_unused_pages() invalidates them instead
+of preserving them for retry. Initialize give_up_on_write inside the
+loop so that only a fatal failure in the current iteration causes
+the remaining dirty folios to be discarded.
+
+Fixes: c4a0c46ec92c ("ext4: invalidate pages if delalloc block allocation fails.")
+Fixes: cb530541182b ("ext4: fix up error handling for mpage_map_and_submit_extent()")
+Cc: stable@vger.kernel.org
+Signed-off-by: guolingxing <guolingxing@tju.edu.cn>
+Reviewed-by: Jan Kara <jack@suse.cz>
+Link: https://patch.msgid.link/20261016110311.71391-1-guolingxing@tju.edu.cn
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+(cherry picked from commit 8eb922c5c4672aa872d1459d74ce5d6fa8846031)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/ext4/inode.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/fs/ext4/inode.c b/fs/ext4/inode.c
+index 62298fda2ef9943cf9ae8a75cf7f23a4d91bbb66..dadb2e8302414879155521359b5df391cbec2c01 100644
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@ -2518,6 +2518,12 @@ static int mpage_map_and_submit_extent(handle_t *handle,
+ 				ext4_print_free_blocks(inode);
+ 		invalidate_dirty_pages:
+ 			*give_up_on_write = true;
++			/*
++			 * Record the error so that a subsequent fsync()
++			 * / errseq check can observe the data loss that
++			 * discarding these dirty pages implies.
++			 */
++			mapping_set_error(inode->i_mapping, err);
+ 			return err;
+ 		}
+ 		progress = 1;
+@@ -2788,7 +2794,6 @@ static int ext4_do_writepages(struct mpage_da_data *mpd)
+ 	int needed_blocks, rsv_blocks = 0, ret = 0;
+ 	struct ext4_sb_info *sbi = EXT4_SB(mapping->host->i_sb);
+ 	struct blk_plug plug;
+-	bool give_up_on_write = false;
+ 
+ 	trace_ext4_writepages(inode, wbc);
+ 
+@@ -2906,6 +2911,8 @@ static int ext4_do_writepages(struct mpage_da_data *mpd)
+ 		goto unplug;
+ 
+ 	while (!mpd->scanned_until_end && wbc->nr_to_write > 0) {
++		bool give_up_on_write = false;
++
+ 		/* For each extent of pages we use new io_end */
+ 		mpd->io_submit.io_end = ext4_init_io_end(inode, GFP_KERNEL);
+ 		if (!mpd->io_submit.io_end) {

@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ThangNN99 <ngocthang2710.1999@gmail.com>
+Date: Mon, 7 Sep 2026 22:50:17 +0700
+Subject: [PATCH 441/455] ext4: avoid buffer/folio lock inversion in
+ __ext4_get_inode_loc()
+
+__ext4_get_inode_loc() looks up the inode bitmap bh while holding the
+lock on the inode table bh:
+
+  __ext4_get_inode_loc()
+    lock_buffer(itable block)
+    sb_getblk(inode bitmap block)
+      __find_get_block_nonatomic()
+        folio_lock(bdev folio for bitmap block)
+
+whereas block_read_full_folio() (e.g. userspace reading the bdev inode
+directly) takes the same two locks in the opposite order:
+
+  block_read_full_folio()
+    folio_lock(some folio)
+      lock_buffer(bh in folio)
+
+With blocksize == foliosize this can't overlap, but once foliosize >
+blocksize the inode table block can land in the same folio as the
+inode bitmap block, and the two orders deadlock on each other's lock.
+Use the non-blocking cache lookup for the bitmap probe instead; a miss
+already falls back to make_io exactly as before.
+
+Only ext4_reserve_inode_write() reaches this probe with a real inode
+(ext4_iget() passes NULL, which skips it), and it normally runs right
+after the read that loaded that same inode, so the itable buffer is
+still warm and the early "already uptodate" return skips the probe.
+The window needs the folio reclaimed between load and writeback, which
+is why this is rare and why syzbot's bisection could not pin it down.
+
+Reproduction status: root-caused from source and confirmed against
+both syzbot stacks (inode.c:__ext4_get_inode_loc vs.
+buffer.c:block_read_full_folio); the lock_buffer()/reserve_inode_write
+path was exercised live (orphan cleanup on mount) to confirm reachability
+and to confirm this patch introduces no regression there. The deadlock
+itself was not reproduced locally -- doing so needs the itable buffer
+genuinely reclaimed between inode load and writeback, which a small
+single-shot QEMU test doesn't naturally produce.
+
+Reported-by: syzbot+03afbb29537f0336b7ad@syzkaller.appspotmail.com
+Closes: https://syzkaller.appspot.com/bug?extid=03afbb29537f0336b7ad
+Reviewed-by: Jan Kara <jack@suse.cz>
+Signed-off-by: ThangNN99 <ngocthang2710.1999@gmail.com>
+Link: https://patch.msgid.link/20260907155017.75543-1-ngocthang2710.1999@gmail.com
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+Cc: stable@kernel.org
+(cherry picked from commit bb94c7a5d31b9a5ea2237ef53d050ddd29e2cf74)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/ext4/inode.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/fs/ext4/inode.c b/fs/ext4/inode.c
+index 6c7c3598c6dc8f692f7b1a942b73e17299b8419b..62298fda2ef9943cf9ae8a75cf7f23a4d91bbb66 100644
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@ -4842,8 +4842,12 @@ static int __ext4_get_inode_loc(struct super_block *sb, unsigned long ino,
+ 
+ 		start = inode_offset & ~(inodes_per_block - 1);
+ 
+-		/* Is the inode bitmap in cache? */
+-		bitmap_bh = sb_getblk(sb, ext4_inode_bitmap(sb, gdp));
++		/*
++		 * Is the inode bitmap in cache? Non-blocking lookup: bh above
++		 * is locked, and blocking here would folio_lock() against a
++		 * block_read_full_folio() that locks bh the other way round.
++		 */
++		bitmap_bh = sb_find_get_block(sb, ext4_inode_bitmap(sb, gdp));
+ 		if (unlikely(!bitmap_bh))
+ 			goto make_io;
+ 

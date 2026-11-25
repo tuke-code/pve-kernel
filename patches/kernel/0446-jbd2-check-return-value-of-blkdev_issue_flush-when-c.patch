@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: guolingxing <guolingxing@tju.edu.cn>
+Date: Tue, 13 Oct 2026 01:40:26 +0000
+Subject: [PATCH 446/455] jbd2: check return value of blkdev_issue_flush() when
+ checkpointing
+
+jbd2_cleanup_journal_tail() calls blkdev_issue_flush() on the file
+system device to make sure all checkpointed data are on permanent
+storage before it updates the log tail in the superblock.  However
+the return value of blkdev_issue_flush() is ignored so if the flush
+fails, we still advance the log tail.  After a crash the journal
+recovery will consider the checkpointed transactions as committed
+and skip the replay while their data may have never reached the
+disk, which may lead to a filesystem corruption.
+
+Abort the journal when the flush fails, similar to how we abort
+when detecting writeback errors of the file system device.
+
+Fixes: 79feb521a447 ("jbd2: issue cache flush after checkpointing even with internal journal")
+Cc: stable@vger.kernel.org
+Reviewed-by: Jan Kara <jack@suse.cz>
+Signed-off-by: guolingxing <guolingxing@tju.edu.cn>
+Link: https://patch.msgid.link/20261013014028.1152277-2-guolingxing@tju.edu.cn
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+(cherry picked from commit 40b2a37f9a7e2264e7f62949ea5b27020a0eacb3)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/jbd2/checkpoint.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/fs/jbd2/checkpoint.c b/fs/jbd2/checkpoint.c
+index 5132737120108cda7cabaabbc1ccd5362b1ec1dc..9bbce4c8cadb68c3990074a6d4ab70783882e003 100644
+--- a/fs/jbd2/checkpoint.c
++++ b/fs/jbd2/checkpoint.c
+@@ -346,8 +346,14 @@ int jbd2_cleanup_journal_tail(journal_t *journal)
+ 	 * need this to guarantee correctness.  Fortunately
+ 	 * jbd2_cleanup_journal_tail() doesn't get called all that often.
+ 	 */
+-	if (journal->j_flags & JBD2_BARRIER)
+-		blkdev_issue_flush(journal->j_fs_dev);
++	if (journal->j_flags & JBD2_BARRIER) {
++		int err = blkdev_issue_flush(journal->j_fs_dev);
++
++		if (err) {
++			jbd2_journal_abort(journal, err);
++			return err;
++		}
++	}
+ 
+ 	return __jbd2_update_log_tail(journal, first_tid, blocknr);
+ }

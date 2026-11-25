@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jiaming Zhang <r772577952@gmail.com>
+Date: Wed, 21 Oct 2026 16:56:35 +0800
+Subject: [PATCH 438/455] ext4: clear in-inode xattr space before adding the
+ first xattr
+
+An inode can hold extended attributes in the space that follows its extra
+fields, whose size is given by i_extra_isize.  When ext4 loads an inode,
+ext4_iget_extra_inode() validates that space only if it starts with the
+xattr magic, and only then sets EXT4_STATE_XATTR.  Without the magic, the
+space is treated as empty and is not checked.
+
+ext4_xattr_ibody_set() passes the space to ext4_xattr_set_entry() whether
+or not EXT4_STATE_XATTR is set.  ext4_xattr_set_entry() walks the entries
+there to find min_offs, the lowest value offset.  That offset decides
+whether the new value fits and where the value is copied:
+
+	free = min_offs - ((void *)last - s->base) - sizeof(__u32);
+	...
+	void *val = s->base + min_offs - new_size;
+
+A crafted image can leave non-zero bytes in that space without the magic
+where ext4 looks for it, for example by shrinking i_extra_isize.  Those
+bytes are parsed as entries, and an entry that claims an in-inode value at
+offset 0 sets min_offs to 0.  Because free is a size_t, the subtraction
+then wraps around to a huge value, and the free space check passes although
+the value does not fit.  The value is copied new_size bytes before the
+start of the space, over the inode's own fields and, for a large value, the
+memory in front of the inode.
+
+On a kernel without KASAN, the copy corrupts memory: it overwrites the
+inode's own fields and, for a large value, also the memory in front of the
+inode.  The bytes and their length are decided by the setxattr() caller.
+Nothing is freed and reused here, so the use-after-free in the report only
+reflects where the write happened to land.
+
+Triggering this issue requires mounting a crafted image, which needs
+CAP_SYS_ADMIN or automounting of removable media; after that, any
+setxattr() on the file reaches this path.  The issue was found by fuzzing
+and has not been seen in production; a reproducer is available in the
+linked report.
+
+When EXT4_STATE_XATTR is not set, zero the first 32 bits of the space in
+ext4_xattr_ibody_set() before calling ext4_xattr_set_entry().  These are
+the bits IS_LAST_ENTRY() reads, so the space is treated as empty and the
+walk stops before reading any stale entry.
+
+Fixes: ac27a0ec112a ("[PATCH] ext4: initial copy of files from ext3")
+Closes: https://lore.kernel.org/lkml/CANypQFZzxTAH=4QRRDoqH6VAw1daAq88NDWiQKoM7QTOnP40sg@mail.gmail.com/
+Cc: stable@vger.kernel.org
+Assisted-by: Claude Code:claude-opus-5-5
+Signed-off-by: Jiaming Zhang <r772577952@gmail.com>
+Reviewed-by: Jan Kara <jack@suse.cz>
+Link: https://patch.msgid.link/20261021085635.3633692-1-r772577952@gmail.com
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+(cherry picked from commit 356c926061758e4a578f3d42069eca65f13d1e80)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/ext4/xattr.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/fs/ext4/xattr.c b/fs/ext4/xattr.c
+index f99de3c2d7ed68b817e25c9013587c4ee88fa3b3..789604073ab33f31e8408c9ce15f15c76597a4b3 100644
+--- a/fs/ext4/xattr.c
++++ b/fs/ext4/xattr.c
+@@ -2286,6 +2286,14 @@ int ext4_xattr_ibody_set(handle_t *handle, struct inode *inode,
+ 		if (IS_ERR(ea_inode))
+ 			return PTR_ERR(ea_inode);
+ 	}
++
++	/*
++	 * Make sure xattr space is properly initialized so that
++	 * IS_LAST_ENTRY() returns true for its first entry
++	 */
++	if (!ext4_test_inode_state(inode, EXT4_STATE_XATTR))
++		*(__u32 *)s->first = 0;
++
+ 	error = ext4_xattr_set_entry(i, s, handle, inode, ea_inode,
+ 				     false /* is_block */);
+ 	if (error) {

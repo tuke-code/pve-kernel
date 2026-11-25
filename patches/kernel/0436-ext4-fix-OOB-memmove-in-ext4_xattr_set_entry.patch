@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zhao Gongyi <zhaogongyi@bytedance.com>
+Date: Fri, 18 Sep 2026 18:12:49 +0800
+Subject: [PATCH 436/455] ext4: fix OOB memmove in ext4_xattr_set_entry
+
+A corrupted filesystem can leave an inode marked as having inline data
+while the system.data xattr is missing. ext4_destroy_inline_data_nolock()
+then asks ext4_xattr_set_entry() to remove an entry even though
+ext4_xattr_ibody_find() left the search state at the insertion position.
+
+In the syzkaller reproducer, the old xattr value offset is smaller than
+min_offs. ext4_xattr_set_entry() then computes val - first_val for
+memmove(), the length wraps to a huge size_t, and memmove() can run out of
+the xattr buffer. This results in an out-of-bounds memmove and a kernel
+page fault.
+
+A crafted corrupted ext4 image can trigger this while inline data is being
+converted out of the inode. Treat the inconsistent inline/xattr state as
+filesystem corruption before updating the xattr entry.
+
+The issue was found by syzkaller and reproduced with the generated C
+reproducer. The crash signature is:
+
+  BUG: unable to handle page fault for address: ffff8880074cf000
+  RIP: 0010:memmove+0x28/0x1b0
+  Call Trace:
+   ext4_xattr_set_entry+0xe2f/0x1e90 fs/ext4/xattr.c:1761
+   ext4_xattr_ibody_set+0x3d6/0x5d0 fs/ext4/xattr.c:2268
+   ext4_destroy_inline_data_nolock+0x288/0x5b0 fs/ext4/inline.c:467
+   ext4_convert_inline_data_nolock+0x178/0xe80 fs/ext4/inline.c:1222
+   ext4_convert_inline_data+0x52a/0x610 fs/ext4/inline.c:2083
+   ext4_fallocate+0x1a0/0x3ba0 fs/ext4/extents.c:4752
+
+Reject the missing system.data xattr before destroying inline data, and
+validate the old value offset before ext4_xattr_set_entry() reaches the
+memmove().
+
+The crash was reproduced on unpatched 7.3.0-rc3 and 6.6.122 kernels. With
+this fix applied to both versions, the same syzkaller C reproducer ran for
+120 seconds without triggering KASAN, Oops, a memmove fault, or panic.
+
+Fixes: 67cf5b09a46f ("ext4: add the basic function for inline data support")
+Cc: stable@vger.kernel.org # v3.8+
+Signed-off-by: Zhao Gongyi <zhaogongyi@bytedance.com>
+Link: https://patch.msgid.link/20260918101249.43643-1-zhaogongyi@bytedance.com
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+(cherry picked from commit e290c77088e6f829f7d1d88c915f2a2fb22241e6)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/ext4/inline.c |  6 ++++++
+ fs/ext4/xattr.c  | 12 ++++++++++++
+ 2 files changed, 18 insertions(+)
+
+diff --git a/fs/ext4/inline.c b/fs/ext4/inline.c
+index 672085e4ec24f28892a6b9c6b6aa5bfa1a10cf19..15e20191fa9271f7c2cea6d2c722f5e0b2ba2a71 100644
+--- a/fs/ext4/inline.c
++++ b/fs/ext4/inline.c
+@@ -462,6 +462,12 @@ static int ext4_destroy_inline_data_nolock(handle_t *handle,
+ 	error = ext4_xattr_ibody_find(inode, &i, &is);
+ 	if (error)
+ 		goto out;
++	if (is.s.not_found) {
++		EXT4_ERROR_INODE(inode,
++				 "corrupted inline data without system.data xattr");
++		error = -EFSCORRUPTED;
++		goto out;
++	}
+ 
+ 	BUFFER_TRACE(is.iloc.bh, "get_write_access");
+ 	error = ext4_journal_get_write_access(handle, inode->i_sb, is.iloc.bh,
+diff --git a/fs/ext4/xattr.c b/fs/ext4/xattr.c
+index c512a7cb82e77c9b420b29dc1b84bb4752a13d9d..f99de3c2d7ed68b817e25c9013587c4ee88fa3b3 100644
+--- a/fs/ext4/xattr.c
++++ b/fs/ext4/xattr.c
+@@ -1708,6 +1708,18 @@ static int ext4_xattr_set_entry(struct ext4_xattr_info *i,
+ 		}
+ 	}
+ 
++	if (!s->not_found && here->e_value_size && !here->e_value_inum) {
++		size_t offs = le16_to_cpu(here->e_value_offs);
++
++		if (offs < min_offs) {
++			EXT4_ERROR_INODE(inode,
++					 "corrupted xattr: value offset %zu < min_offs %zu",
++					 offs, min_offs);
++			ret = -EFSCORRUPTED;
++			goto out;
++		}
++	}
++
+ 	/*
+ 	 * Getting access to old and new ea inodes is subject to failures.
+ 	 * Finish that work before doing any modifications to the xattr data.

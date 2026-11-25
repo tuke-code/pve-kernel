@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Filipe Manana <fdmanana@suse.com>
+Date: Tue, 10 Nov 2026 22:21:19 +0000
+Subject: [PATCH 448/455] btrfs: zstd: fix UAF due to race between putting
+ workspace and reclaim
+
+When we put a workspace with a level matching the requested level, we add
+it back to the lru list of the workspace manager and set the timer to
+run the reclaim function (zstd_reclaim_timer_fn()). If that workspace than
+gets used by some other task, obtained with zstd_find_workspace(), for
+some compression level lower than the workspace's level, we set the
+workspace's req_level field to the requested level (done in
+zstd_find_workspace()) and leave it in the lru list without updating the
+last_used field of the workspace. Once the last_used field ages past the
+ZSTD_BTRFS_RECLAIM_JIFFIES value, when zstd_put_workspace() is called it
+skips the lru update branch because the workspace's req_level does not
+match its level, and then it sets its req_level to 0 before releasing
+the workspace manager's lock - and after that and before
+zstd_put_workspace() does:
+
+  if (workspace->level == clip_level(ZSTD_BTRFS_MAX_LEVEL))
+       cond_wake_up(&zwsm->wait);
+
+the reclaim function, zstd_reclaim_timer_fn(), can run, see the workspace
+in the lru list and see that it has a req_level of 0 and an expired
+last_used time, and therefore call zstd_free_workspace() to free the
+workspace, right before the task that is putting the workspace executes
+the code above to read its level.
+
+Fix this by reading the workspace's level before unlocking the workspace
+manager in zstd_put_workspace().
+
+Link: https://sashiko.dev/#/bug/linux-92b08485-a86c-4bb5-9138-fa80c84389f0
+Fixes: 3f93aef535c8 ("btrfs: add zstd compression level support")
+Reviewed-by: Qu Wenruo <wqu@suse.com>
+Signed-off-by: Filipe Manana <fdmanana@suse.com>
+Reviewed-by: David Sterba <dsterba@suse.com>
+Signed-off-by: David Sterba <dsterba@suse.com>
+(cherry picked from commit 2d8b3d9b210a388129e41757372d70c66ae20a5b)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/btrfs/zstd.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/fs/btrfs/zstd.c b/fs/btrfs/zstd.c
+index 30fa45612e062bf8ab7ffdc350b0fd0c267d73bd..63faf3cd4a6ae5f0d7148d1fb584d8d432b7edf1 100644
+--- a/fs/btrfs/zstd.c
++++ b/fs/btrfs/zstd.c
+@@ -340,6 +340,7 @@ void zstd_put_workspace(struct btrfs_fs_info *fs_info, struct list_head *ws)
+ {
+ 	struct zstd_workspace_manager *zwsm = fs_info->compr_wsm[BTRFS_COMPRESS_ZSTD];
+ 	struct workspace *workspace = list_to_workspace(ws);
++	bool wakeup;
+ 
+ 	ASSERT(zwsm);
+ 	spin_lock_bh(&zwsm->lock);
+@@ -362,9 +363,14 @@ void zstd_put_workspace(struct btrfs_fs_info *fs_info, struct list_head *ws)
+ 	list_add(&workspace->list, &zwsm->idle_ws[workspace->level]);
+ 	workspace->req_level = 0;
+ 
++	/*
++	 * Check if we should wakeup before releasing the lock because after
++	 * that the reclaim function can run and free the workspace.
++	 */
++	wakeup = (workspace->level == clip_level(ZSTD_BTRFS_MAX_LEVEL));
+ 	spin_unlock_bh(&zwsm->lock);
+ 
+-	if (workspace->level == clip_level(ZSTD_BTRFS_MAX_LEVEL))
++	if (wakeup)
+ 		cond_wake_up(&zwsm->wait);
+ }
+ 

@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: guolingxing <guolingxing@tju.edu.cn>
+Date: Tue, 13 Oct 2026 01:40:27 +0000
+Subject: [PATCH 445/455] jbd2: check return value of blkdev_issue_flush() when
+ committing
+
+For journals on a separate device, jbd2_commit_transaction() must
+flush the file system device before submitting the commit record,
+otherwise the transaction may get committed while the ordered data
+are still in the device cache.  However the return value of
+blkdev_issue_flush() is ignored so if the flush fails, the commit
+record is still submitted and fsync() reports success although the
+ordered data may have never reached the disk.  After a crash the
+journal recovery will consider such transactions committed and data
+written by fsync() may be lost.
+
+Abort the journal when the flush fails.  The commit record is then
+not submitted anymore since journal_submit_commit_record() checks
+for an aborted journal.
+
+Fixes: cc3e1bea5d87 ("ext4, jbd2: Add barriers for file systems with exernal journals")
+Cc: stable@vger.kernel.org
+Signed-off-by: guolingxing <guolingxing@tju.edu.cn>
+Link: https://patch.msgid.link/20261013014028.1152277-3-guolingxing@tju.edu.cn
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+(cherry picked from commit b8e62a68c59fc6171c51e919beff5dff6e473f4e)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/jbd2/commit.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/fs/jbd2/commit.c b/fs/jbd2/commit.c
+index 7203d2d2624d7afd0d7a3fe7f830845665dd4c14..c0632bfa022b9e764bf8447a0b1ae21ec10df141 100644
+--- a/fs/jbd2/commit.c
++++ b/fs/jbd2/commit.c
+@@ -774,8 +774,12 @@ void jbd2_journal_commit_transaction(journal_t *journal)
+ 	 */
+ 	if ((commit_transaction->t_need_data_flush || update_tail) &&
+ 	    (journal->j_fs_dev != journal->j_dev) &&
+-	    (journal->j_flags & JBD2_BARRIER))
+-		blkdev_issue_flush(journal->j_fs_dev);
++	    (journal->j_flags & JBD2_BARRIER)) {
++		err = blkdev_issue_flush(journal->j_fs_dev);
++
++		if (err)
++			jbd2_journal_abort(journal, err);
++	}
+ 
+ 	/* Done it all: now write the commit record asynchronously. */
+ 	if (jbd2_has_feature_async_commit(journal)) {

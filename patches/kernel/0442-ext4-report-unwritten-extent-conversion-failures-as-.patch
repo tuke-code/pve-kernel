@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: guolingxing <guolingxing@tju.edu.cn>
+Date: Sun, 1 Nov 2026 10:21:45 +0000
+Subject: [PATCH 442/455] ext4: report unwritten extent conversion failures as
+ writeback errors
+
+When a data writeback bio completes successfully but the subsequent
+unwritten extent conversion fails, ext4_end_io_end() does not record
+the error in the inode's mapping writeback error state.
+
+Bio failures are already recorded by ext4_end_bio(), but conversion
+failures are not. When the conversion is processed asynchronously,
+its return value is not propagated to userspace, so fsync() may
+return success despite the failed conversion.
+
+Record conversion errors with mapping_set_error() before
+ext4_release_io_end() ends folio writeback and wakes waiters. This
+allows fsync() to observe the failure.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: guolingxing <guolingxing@tju.edu.cn>
+Reviewed-by: Jan Kara <jack@suse.cz>
+Reviewed-by: Zhang Yi <yi.zhang@huawei.com>
+Reviewed-by: Ojaswin Mujoo <ojaswin@linux.ibm.com>
+Link: https://patch.msgid.link/20261101102145.647496-1-guolingxing@tju.edu.cn
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+(cherry picked from commit 7b42853f32d97febf8e71e6a07b805b61f7a108c)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ fs/ext4/page-io.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/fs/ext4/page-io.c b/fs/ext4/page-io.c
+index 39fe50b3c662d0fcd36a1e974559ceccfdcf9af3..b1750fd1edbc71195dd276a465aeac02cc315c94 100644
+--- a/fs/ext4/page-io.c
++++ b/fs/ext4/page-io.c
+@@ -198,6 +198,8 @@ static int ext4_end_io_end(ext4_io_end_t *io_end)
+ 			jbd2_journal_abort(EXT4_SB(sb)->s_journal, ret);
+ 	} else {
+ 		ret = ext4_convert_unwritten_io_end_vec(handle, io_end);
++		if (ret < 0)
++			mapping_set_error(inode->i_mapping, ret);
+ 	}
+ 	if (ret < 0 && !ext4_emergency_state(sb) &&
+ 	    io_end->flag & EXT4_IO_END_UNWRITTEN) {
