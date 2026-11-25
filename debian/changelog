@@ -1,3 +1,132 @@
+proxmox-kernel-7.0 (7.0.14-31) trixie; urgency=medium
+
+  * fix #8332: run BPF programs on syscall entry tracepoints, for example the
+    ones of Teleport's session recording, on all CPUs again. Since 7.0.14-17,
+    they only ran for syscalls like execve and openat on CPUs with a perf
+    event of their own, as a stable backport did not fit the 7.0 code.
+
+  * fix #8328: hp-bioscfg: fix a heap overflow on every write to a BIOS
+    setting of HP systems that have no BIOS administrator password set.
+
+  * fix #8367: use 32-bit DMA for JMicron JMB582/JMB585 SATA controllers
+    again, as up to 7.0.14-29. With 64-bit DMA on the host, all ports of
+    such a controller passed through to a VM could fail with some guest
+    kernels.
+
+  * KVM: fix cross-process memory corruption when tearing down a VM or vCPU,
+    ASID collisions across vCPUs with AMD nested virtualization, nested VMX
+    state cleanup issues, and unnecessary emulation on SEV paging faults.
+
+  * mpt3sas: fix NVMe drives behind tri-mode HBAs crashing the host or
+    corrupting memory on I/O of almost 2 MiB that does not start on a page
+    boundary, by lowering their maximum transfer size to 2044 KiB. Also fix
+    out-of-bounds reads after CPU hotplug and missing length validation on
+    SMP passthrough requests.
+
+  * vhost: fix vhost-net writing past the used ring into QEMU's memory when a
+    guest shrinks a virtqueue to fewer than 64 entries.
+
+  * AMD IOMMU: fix reading device table entries past the end of the table,
+    which guests with passed-through devices could abuse. On Zen 1 to Zen 5
+    CPUs, the device table now always has its maximum size.
+
+  * dm-writecache: fix FUA writes in SSD mode getting acknowledged before
+    their metadata was committed, so they could get lost on power failure,
+    and failed flushes being reported as success.
+
+  * md: fix a hang in RAID10, and crashes and an out-of-bounds write when
+    assembling arrays with corrupted superblocks, which are now rejected.
+
+  * NVMe: require CAP_SYS_ADMIN for passthrough commands on partitions, which
+    could otherwise reach the whole namespace, for example from a container
+    with access to a partition. Also fix a NULL pointer dereference in NVMe
+    over TCP and the NVMe target leaking kernel memory in the ANA log page.
+
+  * iSCSI target: fix hanging and doubly completed aborted writes.
+
+  * USB: use usb-storage instead of UAS for ASMedia ASMT135x bridges, which
+    stall and drop writes with UAS.
+
+  * ATA: fix command timeouts on Intel D3-S4510 M.2 240 GB SSDs with firmware
+    XC311102 by limiting their maximum transfer size.
+
+  * amdgpu: fix use-after-free bugs and NULL pointer dereferences that
+    processes with access to the GPU, for example in a container it is passed
+    through to, could trigger, memory corruption with ROCm workloads under
+    memory pressure, and a missed timeout that skipped the GPU queue recovery.
+
+  * kernfs: stop a container under memory pressure from stalling sysfs and
+    cgroupfs for the whole host while listing directories or receiving cgroup
+    event notifications.
+
+  * ext4, jbd2: fix out-of-bounds accesses in inline data and xattr handling,
+    use-after-free bugs in extent merging and failed discard mounts, and a
+    deadlock during inode lookup. Also ensure fsync reports writeback errors
+    instead of succeeding silently, avoid exposing old disk data after a
+    failed zeroout, and abort the journal when cache flushes fail.
+
+  * fs: fix a crash that local users could trigger by racing path lookups
+    with directory changes, splice, sendfile and copy_file_range returning
+    truncated or padded data for FUSE files opened with direct I/O, such as
+    the LXCFS files in containers, a btrfs subvolume deletion by ID removing
+    a different subvolume when racing with a rename, and a btrfs zstd
+    workspace use-after-free during reclaim.
+
+  * FUSE, CIFS: fix use-after-free bugs that malicious FUSE servers, for
+    example in containers, or malicious SMB servers could trigger.
+
+  * XFS: fix extent swapping, as done by xfs_fsr, racing with asynchronous
+    direct writes, which could then corrupt another file.
+
+  * ksmbd: fix an information leak and data injection across sessions
+    through RPC pipes, and a leak of the open file limit with durable
+    handles.
+
+  * net: fix a firewall bypass with crafted IPv6 fragments, where conntrack
+    saw a different port than the local delivery, and out-of-bounds accesses
+    and use-after-free bugs that remote peers could trigger in IPv6 GRO,
+    decapsulation and InfiniBand MAD handling, or guests with an E810 virtual
+    function in the ice driver.
+
+  * net: fix use-after-free bugs, out-of-bounds accesses, crashes, unbounded
+    memory growth and lockups that containers or local users could trigger in
+    their network namespace, among others in socket buffer reference counting,
+    GRO, packet scheduling, the bridge, netlink, TCP, multicast routing,
+    af_key, tun NAPI, IP-TFS, tunnels, nftables, conntrack, SCTP and TIPC.
+
+  * net: fix bnxt NICs no longer receiving large frames after an allocation
+    failure, broken segmentation offload for tunneled TCP on bnx2x NICs since
+    kernel 6.10, VXLAN dropping GBP and GPE frames after a configuration
+    change, veth devices whose stopped transmit queue never got woken up,
+    IPv4 conntrack defragmentation falsely rejecting packets as too large,
+    corrupted TCP checksums on cloned packets with GSO, and an out-of-bounds
+    write in mlx5 software steering after a hardware sync failure.
+
+  * mm: fix a use-after-free in page cache fault-around, a crash when reading
+    /proc/PID/maps of a process that unmaps all its memory, and tasks waiting
+    forever on a split folio, all reachable by local users.
+
+  * hugetlbfs: fix an overflow with which local users could use up all free
+    huge pages and crash the kernel, and memory corruption when truncating
+    files with private huge page mappings.
+
+  * keys: fix keyrings losing keys with crafted descriptions, which
+    unprivileged containers can add, keyring crashes, a use-after-free with
+    ML-DSA signed X.509 certificates and out-of-bounds accesses with tiny RSA
+    keys.
+
+  * block: fix fsync returning success after a failed disk cache flush, and
+    use-after-free bugs when syncing a deleted disk and with btrfs writes from
+    block cgroups, such as containers.
+
+  * fix a hard lockup when a signal races a multi-threaded exec,
+    use-after-free bugs in user resource limit counting, perf event setup and
+    failed process creation, SysV message queue receivers reading messages
+    after permission revocation, and AppArmor profile transitions failing for
+    profiles with differential state encoding.
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 25 Nov 2026 23:12:00 +0100
+
 proxmox-kernel-7.0 (7.0.14-30) trixie; urgency=medium
 
   * update sources to Ubuntu-7.0.0-44.44 plus the upstream stable changes up
