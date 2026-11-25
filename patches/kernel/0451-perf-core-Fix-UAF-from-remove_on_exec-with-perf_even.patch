@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Phat Dinh <phatdt1116@gmail.com>
+Date: Tue, 3 Nov 2026 15:56:41 +0700
+Subject: [PATCH 451/455] perf/core: Fix UAF from remove_on_exec with
+ perf_event_open()
+
+perf_event_open() installs the event into the target context and then
+drops the target's exec_update_lock before linking event->owner_entry
+into current->perf_event_list. This leaves a window in which the
+target can exec() while the event is live in its context but not yet
+on the owner's list.
+
+If the event has attr.remove_on_exec set, perf_event_remove_on_exec()
+detaches it in that window through perf_remove_from_owner(), which
+does list_del_init(&event->owner_entry) on the not-yet-linked entry
+and clears event->owner. perf_event_open() then continues and adds
+the now ownerless event to current->perf_event_list:
+
+  CPU 0: perf_event_open()          CPU 1: target task exec()
+  ------------------------          -------------------------
+  perf_install_in_context(event)
+  event->owner = current
+  up_read(exec_update_lock)
+                                    down_write(exec_update_lock)
+                                    perf_event_remove_on_exec()
+                                      perf_remove_from_owner(event)
+                                        list_del_init(&event->owner_entry)
+                                        event->owner = NULL
+                                    up_write(exec_update_lock)
+  list_add_tail(&event->owner_entry,
+                &current->perf_event_list)
+
+When the event fd is closed, perf_release() sees event->owner == NULL,
+skips unlinking owner_entry and frees the event, leaving a dangling
+entry on the opener's perf_event_list. The next walk of that list,
+e.g. perf_event_exit_task() or PR_TASK_PERF_EVENTS_{EN,DIS}ABLE,
+is a use-after-free.
+
+Fix this by linking the event into current->perf_event_list before
+releasing exec_update_lock, so exec() cannot observe the event until
+it is fully published. Lock order is exec_update_lock ->
+perf_event_mutex, the same as perf_event_exit_task() called from
+exec, so no new dependency is introduced.
+
+Fixes: 2e498d0a74e5 ("perf: Add support for event removal on exec")
+Signed-off-by: Phat Dinh <phatdt1116@gmail.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Cc: stable@vger.kernel.org
+Link: https://patch.msgid.link/20261103085641.3686424-1-phatdt1116@gmail.com
+(cherry picked from commit 4aa81df6bb45e9cf693c86849fe90d4e3dd85bbc)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ kernel/events/core.c | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/kernel/events/core.c b/kernel/events/core.c
+index b398855b15434ad3b0b4b5c52a61223b297d02b2..5f93b848280224d5c49d61c571276e00bf86fe91 100644
+--- a/kernel/events/core.c
++++ b/kernel/events/core.c
+@@ -14217,15 +14217,22 @@ SYSCALL_DEFINE5(perf_event_open,
+ 
+ 	mutex_unlock(&ctx->mutex);
+ 
+-	if (task) {
+-		up_read(&task->signal->exec_update_lock);
+-		put_task_struct(task);
+-	}
+-
++	/*
++	 * Publish the event on the owner's list before dropping
++	 * exec_update_lock. Otherwise a concurrent exec() can run
++	 * perf_event_remove_on_exec() and clear event->owner before
++	 * owner_entry is linked, leaving an ownerless event on
++	 * current->perf_event_list that perf_release() won't unlink.
++	 */
+ 	mutex_lock(&current->perf_event_mutex);
+ 	list_add_tail(&event->owner_entry, &current->perf_event_list);
+ 	mutex_unlock(&current->perf_event_mutex);
+ 
++	if (task) {
++		up_read(&task->signal->exec_update_lock);
++		put_task_struct(task);
++	}
++
+ 	/*
+ 	 * File reference in group guarantees that group_leader has been
+ 	 * kept alive until we place the new event on the sibling_list.
