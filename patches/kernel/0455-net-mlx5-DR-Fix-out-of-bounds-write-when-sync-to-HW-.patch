@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yevgeny Kliteynik <kliteyn@nvidia.com>
+Date: Wed, 18 Nov 2026 19:32:27 +0200
+Subject: [PATCH 455/455] net/mlx5: DR, Fix out-of-bounds write when sync to HW
+ fails
+
+mlx5dr_icm_free_chunk() moves a freed chunk to the "hot" chunks array by
+writing it to hot_chunks_arr and, once the accumulated hot memory
+crosses a threshold, triggers a sync to HW that flushes the array.  The
+array is large enough to hold the chunks of a single accumulation cycle,
+and relies on the sync path to flush it.
+
+However, if sync to HW fails, hot chunks array is not cleared, and every
+subsequent mlx5dr_icm_free_chunk will write past the end of
+hot_chunks_arr, resulting in an out-of-bounds write and kernel heap
+corruption.
+
+A failed sync to HW also means it is no longer safe to recycle ICM: a
+chunk's memory may only be returned to the buddy allocator (and thus be
+reused) after a sync has confirmed that HW no longer references it.
+
+The issue was discovered by a fuzzer that repeatedly triggered sync
+failure, at which point the out-of-bounds write was reported by KASAN:
+
+   KASAN log excerpt: BUG:
+     slab-out-of-bounds in mlx5dr_icm_free_chunk+0x4cd at call 2
+     (hot_chunks_num=3 > cap=2).
+
+Fix this by putting the pool into an error state on the first failed
+sync to HW, reporting the failure once. The sync is not retried, and
+while the pool is in this state:
+
+- mlx5dr_icm_free_chunk() doesn't queue freed chunks; the segment is
+  left reserved and is reclaimed when the pool is destroyed.
+
+- mlx5dr_icm_alloc_chunk() doesn't serve new chunks.
+
+Fixes: 4519fc45beeb ("net/mlx5: DR, Keep track of hot ICM chunks in an array instead of list")
+Signed-off-by: Yevgeny Kliteynik <kliteyn@nvidia.com>
+Reviewed-by: Alex Vesker <valex@nvidia.com>
+Signed-off-by: Tariq Toukan <tariqt@nvidia.com>
+Link: https://patch.msgid.link/20261118173227.1957670-3-tariqt@nvidia.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+(cherry picked from commit 0e56ff4441eea333bfbfeff86ef39038f6e8c378)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ .../mlx5/core/steering/sws/dr_icm_pool.c      | 32 +++++++++++++++++--
+ 1 file changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/steering/sws/dr_icm_pool.c b/drivers/net/ethernet/mellanox/mlx5/core/steering/sws/dr_icm_pool.c
+index 7a0a1582239250995455dbf84ca876045f513be5..a40e0caa31f9a68033bd1ba713d8c118a9bf22c0 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/steering/sws/dr_icm_pool.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/steering/sws/dr_icm_pool.c
+@@ -33,6 +33,11 @@ struct mlx5dr_icm_pool {
+ 	u64 hot_memory_size;
+ 	/* hot memory size threshold for triggering sync */
+ 	u64 th;
++	/* Set when a sync to HW fails - no new chunks are served, freed
++	 * chunks are no longer queued, and their ICM is not returned to
++	 * the buddy allocator.
++	 */
++	bool error_state;
+ };
+ 
+ struct mlx5dr_icm_dm {
+@@ -368,7 +373,15 @@ static int dr_icm_pool_sync_all_buddy_pools(struct mlx5dr_icm_pool *pool)
+ 
+ 	err = mlx5dr_cmd_sync_steering(pool->dmn->mdev);
+ 	if (err) {
+-		mlx5dr_err(pool->dmn, "Failed to sync to HW (err: %d)\n", err);
++		/* The hot chunks could not be flushed. Put the pool in an
++		 * error state so that no further chunks are queued (which
++		 * would overflow hot_chunks_arr), and no new chunks are
++		 * served. The sync is not retried.
++		 */
++		mlx5dr_err(pool->dmn,
++			   "Failed to sync to HW (err: %d), disabling ICM pool\n",
++			   err);
++		pool->error_state = true;
+ 		return err;
+ 	}
+ 
+@@ -443,6 +456,10 @@ mlx5dr_icm_alloc_chunk(struct mlx5dr_icm_pool *pool,
+ 		return NULL;
+ 
+ 	mutex_lock(&pool->mutex);
++
++	if (pool->error_state)
++		goto out;
++
+ 	/* find mem, get back the relevant buddy pool and seg in that mem */
+ 	ret = dr_icm_handle_buddies_get_mem(pool, chunk_size, &buddy, &seg);
+ 	if (ret)
+@@ -475,6 +492,14 @@ void mlx5dr_icm_free_chunk(struct mlx5dr_icm_chunk *chunk)
+ 	/* move the chunk to the waiting chunks array, AKA "hot" memory */
+ 	mutex_lock(&pool->mutex);
+ 
++	/* If the pool is in an error state, the chunk must not be queued.
++	 * ICM memory is not returned to the buddy allocator - it is
++	 * reclaimed only when the pool is destroyed.
++	 * Just free the chunk's bookkeeping struct.
++	 */
++	if (pool->error_state)
++		goto out;
++
+ 	pool->hot_memory_size += mlx5dr_icm_pool_get_chunk_byte_size(chunk);
+ 
+ 	hot_chunk = &pool->hot_chunks_arr[pool->hot_chunks_num++];
+@@ -482,12 +507,13 @@ void mlx5dr_icm_free_chunk(struct mlx5dr_icm_chunk *chunk)
+ 	hot_chunk->seg = chunk->seg;
+ 	hot_chunk->size = chunk->size;
+ 
+-	kmem_cache_free(chunks_cache, chunk);
+-
+ 	/* Check if we have chunks that are waiting for sync-ste */
+ 	if (dr_icm_pool_is_sync_required(pool))
+ 		dr_icm_pool_sync_all_buddy_pools(pool);
+ 
++out:
++	kmem_cache_free(chunks_cache, chunk);
++
+ 	mutex_unlock(&pool->mutex);
+ }
+ 

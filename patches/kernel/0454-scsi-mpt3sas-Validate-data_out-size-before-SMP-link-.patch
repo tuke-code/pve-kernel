@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Weibin Liu <liuwb@xiaopeng.com>
+Date: Thu, 29 Oct 2026 15:33:16 +0800
+Subject: [PATCH 454/455] scsi: mpt3sas: Validate data_out size before SMP
+ link-reset check
+
+_ctl_do_mpt_command() handles MPI2_FUNCTION_SMP_PASSTHROUGH by reading
+data[1] and data[10] of the data_out buffer to detect SMP link-reset
+requests. The non-IMMEDIATE path sets data = data_out after checking only
+for a NULL pointer, so a payload shorter than 11 bytes can read past the
+end of the buffer, and out-of-bounds bytes can unexpectedly set
+ioc_link_reset_in_progress and ignore_loginfos.
+
+However, a short SMP request is not invalid: SMP_REPORT_GENERAL, for
+example, can use an 8-byte payload. Rejecting every data_out smaller than
+11 bytes would break valid requests.
+
+Instead, require enough data only when checking for a link reset, and keep
+sending the request normally otherwise. The IMMEDIATE path reads from the
+request frame rather than data_out, so data_out_sz does not apply to it.
+
+Fixes: f92363d12359 ("[SCSI] mpt3sas: add new driver supporting 12GB SAS")
+Cc: stable@vger.kernel.org # 3.8+
+Reviewed-by: Guanglei Zhu <zhugl3@xiaopeng.com>
+Signed-off-by: Weibin Liu <liuwb@xiaopeng.com>
+Link: https://patch.msgid.link/20261029073316.4188569-1-liuwb@xiaopeng.com
+Signed-off-by: Martin K. Petersen (Oracle) <mkp@kernel.org>
+(cherry picked from commit efd68f17acca65f581b9f2fa9ba50c8643ab544d)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/scsi/mpt3sas/mpt3sas_ctl.c | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/scsi/mpt3sas/mpt3sas_ctl.c b/drivers/scsi/mpt3sas/mpt3sas_ctl.c
+index 8bb947004885bf4e3c52de314a249f2417275527..b069dd384ed781d7d094091d0891e4645c59c1c7 100644
+--- a/drivers/scsi/mpt3sas/mpt3sas_ctl.c
++++ b/drivers/scsi/mpt3sas/mpt3sas_ctl.c
+@@ -57,9 +57,13 @@
+ #include <linux/io.h>
+ #include <linux/uaccess.h>
+ 
++#include <scsi/sas.h>
++
+ #include "mpt3sas_base.h"
+ #include "mpt3sas_ctl.h"
+ 
++/* PHY operation byte in an SMP PHY Control request */
++#define SMP_PHY_CONTROL_OP_OFFSET	10
+ 
+ static struct fasync_struct *async_queue;
+ static DECLARE_WAIT_QUEUE_HEAD(ctl_poll_wait);
+@@ -959,13 +963,17 @@ _ctl_do_mpt_command(struct MPT3SAS_ADAPTER *ioc, struct mpt3_ioctl_command karg,
+ 		Mpi2SmpPassthroughRequest_t *smp_request =
+ 		    (Mpi2SmpPassthroughRequest_t *)mpi_request;
+ 		u8 *data;
++		bool immediate;
+ 
+ 		if (!ioc->multipath_on_hba) {
+ 			/* ioc determines which port to use */
+ 			smp_request->PhysicalPort = 0xFF;
+ 		}
+-		if (smp_request->PassthroughFlags &
+-		    MPI2_SMP_PT_REQ_PT_FLAGS_IMMEDIATE)
++
++		immediate = smp_request->PassthroughFlags &
++			    MPI2_SMP_PT_REQ_PT_FLAGS_IMMEDIATE;
++
++		if (immediate)
+ 			data = (u8 *)&smp_request->SGL;
+ 		else {
+ 			if (unlikely(data_out == NULL)) {
+@@ -978,7 +986,11 @@ _ctl_do_mpt_command(struct MPT3SAS_ADAPTER *ioc, struct mpt3_ioctl_command karg,
+ 			data = data_out;
+ 		}
+ 
+-		if (data[1] == 0x91 && (data[10] == 1 || data[10] == 2)) {
++		if ((immediate ||
++		     data_out_sz >= SMP_PHY_CONTROL_OP_OFFSET + 1) &&
++		    data[1] == SMP_PHY_CONTROL &&
++		    (data[10] == PHY_FUNC_LINK_RESET ||
++		     data[10] == PHY_FUNC_HARD_RESET)) {
+ 			ioc->ioc_link_reset_in_progress = 1;
+ 			ioc->ignore_loginfos = 1;
+ 		}

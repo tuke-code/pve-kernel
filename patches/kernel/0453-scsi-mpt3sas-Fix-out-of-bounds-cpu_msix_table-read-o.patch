@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Louis Sautier <sautier.louis@gmail.com>
+Date: Wed, 18 Nov 2026 21:13:16 +0100
+Subject: [PATCH 453/455] scsi: mpt3sas: Fix out-of-bounds cpu_msix_table read
+ on CPU hotplug
+
+mpt3sas_base_attach() allocates cpu_msix_table based on the highest CPU
+online at probe time, but _base_get_msix_index() indexes it with
+raw_smp_processor_id() without a bounds check. Once a CPU with a higher id
+comes online, I/O submitted from it causes an out-of-bounds read of the
+table. The value read is sent to the firmware as the reply queue
+index. When it is not a valid queue, the IOC faults and I/O fails.
+
+On a SAS3224 (FW 16.00.01.00) running v7.4-rc3 with KASAN, booted with
+maxcpus=1 and CPUs 1-95 onlined later, read-only fio pinned to each CPU in
+turn triggers, on CPU 1:
+
+  BUG: KASAN: slab-out-of-bounds in _base_get_msix_index+0x1de/0x230 [mpt3sas]
+  Read of size 1 at addr ffff88812fdf51c1 by task kworker/1:1H/1528
+
+and, on CPU 16:
+
+  mpt3sas_cm0: fault_state(0x1500)!
+  mpt3sas_cm0: sending diag reset !!
+  I/O error, dev sda, sector 3873068048 op 0x0:(READ) flags 0x800000 phys_seg 1 prio class 2
+  mpt3sas_cm0: removing unresponding devices: start
+  sd 0:0:0:0: [sda] Synchronizing SCSI cache
+
+Allocate the table based on nr_cpu_ids instead, and map every CPU in each
+reply queue's affinity mask, including offline ones. Managed IRQ affinity
+already spreads the vectors over all possible CPUs, so a CPU onlined later
+uses the queue whose affinity mask contains it.
+
+The online-mask restriction and the bounds check added by commit
+4a8842de8db4 ("scsi: mpt3sas: fix an out of bound write") are no longer
+needed, since the table now has an entry for every possible CPU.
+
+When smp_affinity_enable=0 or a reply queue has no affinity mask, the
+fallback path still sets only the entries of the CPUs online at probe
+time. A CPU onlined later then reads 0 from the zeroed table, and queue 0
+is always a valid queue.
+
+With the change, the same fio test runs without errors, also while CPUs
+1-95 are taken offline and back online in a loop. With maxcpus=12 (12 reply
+queues), I/O from each of the 96 CPUs completes on the vector whose
+affinity mask contains that CPU.
+
+Fixes: f92363d12359 ("[SCSI] mpt3sas: add new driver supporting 12GB SAS")
+Cc: stable@vger.kernel.org
+Signed-off-by: Louis Sautier <sautier.louis@gmail.com>
+Link: https://patch.msgid.link/20261118201316.326943-1-sautier.louis@gmail.com
+Signed-off-by: Martin K. Petersen (Oracle) <mkp@kernel.org>
+(cherry picked from commit 14bc5d239dddb3ce1264de74b8460c0a61745563)
+Signed-off-by: Thomas Lamprecht <t.lamprecht@proxmox.com>
+---
+ drivers/scsi/mpt3sas/mpt3sas_base.c | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/scsi/mpt3sas/mpt3sas_base.c b/drivers/scsi/mpt3sas/mpt3sas_base.c
+index ae2f7d9c281f920fdaaa189fc6c04b257b9759f9..c4977d4480fb0143baec94b1c28b3c185415526b 100644
+--- a/drivers/scsi/mpt3sas/mpt3sas_base.c
++++ b/drivers/scsi/mpt3sas/mpt3sas_base.c
+@@ -3264,11 +3264,8 @@ _base_assign_reply_queues(struct MPT3SAS_ADAPTER *ioc)
+ 				goto fall_back;
+ 			}
+ 
+-			for_each_cpu_and(cpu, mask, cpu_online_mask) {
+-				if (cpu >= ioc->cpu_msix_table_sz)
+-					break;
++			for_each_cpu(cpu, mask)
+ 				ioc->cpu_msix_table[cpu] = reply_q->msix_index;
+-			}
+ 		}
+ 		return;
+ 	}
+@@ -8414,15 +8411,18 @@ int
+ mpt3sas_base_attach(struct MPT3SAS_ADAPTER *ioc)
+ {
+ 	int r, i, rc;
+-	int cpu_id, last_cpu_id = 0;
+ 
+ 	dinitprintk(ioc, ioc_info(ioc, "%s\n", __func__));
+ 
+ 	/* setup cpu_msix_table */
+ 	ioc->cpu_count = num_online_cpus();
+-	for_each_online_cpu(cpu_id)
+-		last_cpu_id = cpu_id;
+-	ioc->cpu_msix_table_sz = last_cpu_id + 1;
++	/*
++	 * Allocate an entry for every possible CPU, because
++	 * _base_get_msix_index() indexes the table with
++	 * raw_smp_processor_id(), which can be a CPU brought online after
++	 * the adapter was attached.
++	 */
++	ioc->cpu_msix_table_sz = nr_cpu_ids;
+ 	ioc->cpu_msix_table = kzalloc(ioc->cpu_msix_table_sz, GFP_KERNEL);
+ 	ioc->reply_queue_count = 1;
+ 	if (!ioc->cpu_msix_table) {
